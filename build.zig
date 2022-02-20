@@ -1,17 +1,26 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
-    const target = b.standardTargetOptions(.{});
+// TODO: Add a build option that enables execution tracing. If set, traces will be written to
+// std out. If set and an argument is provided, treat the argument as the filename of a log file.
+// Every time vm is ran, a timestamped execution trace with the file name that the vm was invoked
+// with is appeneded to the output stream.
 
-    // Standard release options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
+pub fn build(b: *std.build.Builder) void {
+    const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
+    const tracing_enabled =
+        b.option(
+        bool,
+        "enable-tracing",
+        "Set to enable VM execution trace logging",
+    ) orelse true;
+
+    const options = b.addOptions();
+    options.addOption(bool, "tracing_enabled", tracing_enabled);
+
     const exe = b.addExecutable("zlox", "src/main.zig");
+    exe.addOptions("build_options", options);
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();

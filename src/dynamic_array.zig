@@ -39,6 +39,12 @@ pub fn DynamicArray(comptime T: type) type {
             std.mem.copy(T, self.elems[len..], slice);
         }
 
+        /// A pointer to the last item in the array. The pointer may become invalid if it is still
+        /// held after a call to an `append*` function.
+        pub fn end(self: Self) *T {
+            return &self.elems[self.elems.len - 1];
+        }
+
         fn verifyCapacity(self: *Self, new_len: usize) !void {
             if (new_len >= self.capacity) {
                 // Double the size of the backing array every time it fills up.
@@ -77,4 +83,12 @@ test "appendSlice" {
     const str: []const u8 = "Hello World!";
     try arr.appendSlice(str);
     try testing.expect(std.mem.eql(u8, arr.elems, str));
+}
+
+test "end" {
+    var arr = DynamicArray(u8).init(testing.allocator);
+    defer arr.deinit();
+    const str: []const u8 = "Hello World!";
+    try arr.appendSlice(str);
+    try testing.expect(str[11] == arr.end().*);
 }
