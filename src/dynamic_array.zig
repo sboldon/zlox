@@ -39,6 +39,10 @@ pub fn DynamicArray(comptime T: type) type {
             std.mem.copy(T, self.elems[len..], slice);
         }
 
+        pub fn toSlice(self: *Self) []const T {
+            return self.elems;
+        }
+
         /// A pointer to the last item in the array. The pointer may become invalid if it is still
         /// held after a call to an `append*` function.
         pub fn end(self: Self) *T {
@@ -73,16 +77,16 @@ test "append" {
     var arr = DynamicArray(u8).init(testing.allocator);
     defer arr.deinit();
     try arr.append('c');
-    try testing.expect(arr.elems.len == 1);
-    try testing.expect(arr.elems[0] == 'c');
+    try testing.expectEqual(@as(usize, 1), arr.elems.len);
+    try testing.expectEqual(@as(u8, 'c'), arr.elems[0]);
 }
 
 test "appendSlice" {
     var arr = DynamicArray(u8).init(testing.allocator);
     defer arr.deinit();
-    const str: []const u8 = "Hello World!";
-    try arr.appendSlice(str);
-    try testing.expect(std.mem.eql(u8, arr.elems, str));
+    const expect: []const u8 = "Hello World!";
+    try arr.appendSlice(expect);
+    try testing.expectEqualStrings(expect, arr.elems);
 }
 
 test "end" {
@@ -90,5 +94,5 @@ test "end" {
     defer arr.deinit();
     const str: []const u8 = "Hello World!";
     try arr.appendSlice(str);
-    try testing.expect(str[11] == arr.end().*);
+    try testing.expectEqual(str[11], arr.end().*);
 }

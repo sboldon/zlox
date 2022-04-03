@@ -12,15 +12,19 @@ pub fn build(b: *std.build.Builder) void {
     const tracing_enabled =
         b.option(
         bool,
-        "enable-tracing",
-        "Set to enable VM execution trace logging",
+        "exec-tracing",
+        "Enable VM execution traces",
     ) orelse true;
 
     const options = b.addOptions();
-    options.addOption(bool, "tracing_enabled", tracing_enabled);
+    options.addOption(bool, "exec_tracing", tracing_enabled);
 
     const exe = b.addExecutable("zlox", "src/main.zig");
     exe.addOptions("build_options", options);
+    const opt_asm_path = b.option([]const u8, "emit-asm", "Output .s (assembly code)");
+    if (opt_asm_path) |path| {
+        exe.emit_asm = .{ .emit_to = path };
+    }
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
@@ -35,6 +39,7 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest("src/main.zig");
+    exe_tests.addOptions("build_options", options);
     exe_tests.setTarget(target);
     exe_tests.setBuildMode(mode);
 
