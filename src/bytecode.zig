@@ -2,10 +2,10 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+const DynamicArray = @import("dynamic_array.zig").DynamicArray;
 const value = @import("value.zig");
 const Value = value.Value;
 const ValueType = value.ValueType;
-const DynamicArray = @import("dynamic_array.zig").DynamicArray;
 
 // Underscore denotes an open enum meaning that @intToEnum on an int not in the enum can be matched against
 // with '_' in switch statements.
@@ -75,21 +75,40 @@ pub const Chunk = struct {
         self.line_info.deinit();
     }
 
-    pub fn write(self: *Self, byte: u8, line: usize) !void {
+    /// Add an instruction or constant to the chunk. Expecting `item` to be a `Value`, `OpCode`, or `u8`.
+    pub fn write(self: *Self, item: anytype, line: usize) !void {
+        const T = @TypeOf(item);
+        if (T == Value) {
+            try self.writeByte(@enumToInt(OpCode.constant), line);
+            try self.writeByte(try self.addConstant(item), line);
+        } else if (T == @Type(.EnumLiteral) or T == OpCode) {
+            try self.writeByte(@enumToInt(@as(OpCode, item)), line);
+        } else {
+            // Expecting `T` to be u8.
+            try self.writeByte(item, line);
+        }
+    }
+
+    fn writeByte(self: *Self, byte: u8, line: usize) !void {
         try self.code.append(byte);
         try self.line_info.update(line);
     }
 
-    pub fn writeOpCode(self: *Self, op: OpCode, line: usize) !void {
-        try self.code.append(@enumToInt(op));
-        try self.line_info.update(line);
-    }
-
     /// Add a constant to the data section of the chunk and return the index that it is stored at.
-    pub fn addConstant(self: *Self, val: Value) !u8 {
-        const index = @truncate(u8, self.data.elems.len);
+    fn addConstant(self: *Self, val: Value) !u8 {
+        const index = self.data.elems.len;
+        if (index > 255) {
+            // TODO: Support a greater number of constants by adding new opcode with 2 two byte
+            // indices.
+            std.debug.panic(
+                "Attempted to add a constant to a full chunk. Currently only 256 constants can " ++
+                    "fit in a chunk because `OpCode.constant` uses a single byte to store the " ++
+                    "index of a constant.\n ",
+                .{},
+            );
+        }
         try self.data.append(val);
-        return index;
+        return @truncate(u8, index);
     }
 
     /// Display the contents of the chunk using the writer provided.
@@ -103,7 +122,6 @@ pub const Chunk = struct {
     }
 
     pub fn disassembleInstr(self: *Self, writer: anytype, offset: usize) !usize {
-        // try writer.print("offset: {}\n", .{offset});
         const op = @intToEnum(OpCode, self.code.elems[offset]);
         try writer.print("{:0>4} ", .{offset});
         if (self.line_info.onSameLine(offset)) {
@@ -127,24 +145,66 @@ pub const Chunk = struct {
         };
     }
 
+    /// Expecting `ref` to be a `usize` or `[*]u8`.
     pub fn lineOfInstr(self: *Self, ref: anytype) usize {
         const T = @TypeOf(ref);
         return switch (@typeInfo(T)) {
-            .Int => |info| if (info.signedness == std.builtin.Signedness.unsigned)
-                self.line_info.getLineFromOffset(ref)
-            else
-                @compileError("invalid type " ++ @typeName(T)),
-            .Pointer => |info| if (info.size == std.builtin.TypeInfo.Pointer.Size.Many and info.child == u8)
-                self.line_info.getLineFromOffset(self.offsetOfAddr(ref))
-            else
-                @compileError("invalid type " ++ @typeName(T)),
-            else => @compileError("invalid type " ++ @typeName(T)),
+            .Int => self.line_info.getLineFromOffset(ref),
+            .Pointer => self.line_info.getLineFromOffset(self.offsetOfAddr(ref)),
+            else => @compileError(
+                "invalid type for `ref` argument of `Chunk.lineOfInstr` function: " ++
+                    @typeName(T),
+            ),
         };
     }
 
     /// Given its address, return the offset of an instruction.
     pub inline fn offsetOfAddr(self: Self, instruct_addr: [*]const u8) usize {
         return @ptrToInt(instruct_addr) - @ptrToInt(self.code.elems.ptr);
+    }
+
+    /// Populate a test chunk with instructions and constants. Everything is written to the chunk at
+    /// the same line number.
+    pub fn fill(self: *Self, comptime contents: anytype) !void {
+        inline for (contents) |item| {
+            try self.write(item, 1);
+        }
+    }
+
+    /// Compare the instructions and constants of two chunks for equality.
+    pub fn expectEqual(expected: *Self, actual: *Self) !void {
+        try testing.expectEqualSlices(u8, expected.code.toSlice(), actual.code.toSlice());
+        try testing.expectEqualSlices(Value, expected.data.toSlice(), actual.data.toSlice());
+    }
+
+    test "disassemble" {
+        var list = std.ArrayList(u8).init(testing.allocator);
+        var chunk = Chunk.init(testing.allocator);
+        defer list.deinit();
+        defer chunk.deinit();
+
+        try chunk.write(Value.init(1.2), 1);
+        try chunk.write(Value.init(3.4), 1);
+        try chunk.write(.add, 1);
+        try chunk.write(Value.init(2), 1);
+        try chunk.write(.div, 1);
+        try chunk.write(.neg, 1);
+        try chunk.write(.ret, 2);
+        try chunk.write(.ret, 3);
+        try chunk.disassemble(list.writer(), "test chunk");
+        var expect =
+            \\== test chunk ==
+            \\0000    1 constant 0 '1.2'
+            \\0002    | constant 1 '3.4'
+            \\0004    | add
+            \\0005    | constant 2 '2'
+            \\0007    | div
+            \\0008    | neg
+            \\0009    2 ret
+            \\0010    3 ret
+            \\
+        ;
+        try testing.expectEqualStrings(expect, list.items);
     }
 };
 
@@ -154,7 +214,7 @@ const LineInfo = struct {
     // instruction that begins a new line, the difference in offset and line number from the
     // instruction that began the previous line are appended to the list. If either increment is
     // greater than 255, pairs of the form (255, 0) or (0, 255) are appended until the remaining
-    // increment value can fit in a u8. This method is adopted from how Python tracks line
+    // increment can fit in a u8. This method is adopted from how Python tracks line
     // information in its bytecode representation.
     line_tbl: DynamicArray(u8),
     line: usize = 0,
@@ -162,13 +222,11 @@ const LineInfo = struct {
     lower_bound: usize = 0, // The offset of the instruction that starts the current line.
     upper_bound: usize = 0, // The offset of the instruction that starts the next line.
 
-    pub fn init(alloc: Allocator) Self {
-        return .{
-            .line_tbl = DynamicArray(u8).init(alloc),
-        };
+    fn init(alloc: Allocator) Self {
+        return .{ .line_tbl = DynamicArray(u8).init(alloc) };
     }
 
-    pub fn deinit(self: Self) void {
+    fn deinit(self: Self) void {
         self.line_tbl.deinit();
     }
 
@@ -196,12 +254,12 @@ const LineInfo = struct {
 
     /// Avoid calling getLineFromOffset for each instruction by first checking if the instruction's offset is on the
     /// same line as the previous instruction.
-    pub fn onSameLine(self: Self, instruct_offset: usize) bool {
+    fn onSameLine(self: Self, instruct_offset: usize) bool {
         return (self.lower_bound <= instruct_offset and instruct_offset < self.upper_bound);
     }
 
     /// Given the offset of an instruction, return its line number.
-    pub fn getLineFromOffset(self: *Self, instruct_offset: usize) usize {
+    fn getLineFromOffset(self: *Self, instruct_offset: usize) usize {
         var offset: usize = 0;
         var prev_offset: usize = 0;
         var line: usize = 0;
@@ -226,35 +284,6 @@ const LineInfo = struct {
     }
 };
 
-test "disassemble" {
-    var list = std.ArrayList(u8).init(testing.allocator);
-    var chunk = Chunk.init(testing.allocator);
-    defer list.deinit();
-    defer chunk.deinit();
-
-    try chunk.writeOpCode(.constant, 1);
-    try chunk.write(try chunk.addConstant(Value.init(1.2)), 1);
-    try chunk.writeOpCode(.constant, 1);
-    try chunk.write(try chunk.addConstant(Value.init(3.4)), 1);
-    try chunk.writeOpCode(.add, 1);
-    try chunk.writeOpCode(.constant, 1);
-    try chunk.write(try chunk.addConstant(Value.init(2)), 1);
-    try chunk.writeOpCode(.div, 1);
-    try chunk.writeOpCode(.neg, 1);
-    try chunk.writeOpCode(.ret, 2);
-    try chunk.writeOpCode(.ret, 3);
-    try chunk.disassemble(list.writer(), "test chunk");
-    var expect =
-        \\== test chunk ==
-        \\0000    1 constant 0 '1.2'
-        \\0002    | constant 1 '3.4'
-        \\0004    | add
-        \\0005    | constant 2 '2'
-        \\0007    | div
-        \\0008    | neg
-        \\0009    2 ret
-        \\0010    3 ret
-        \\
-    ;
-    try testing.expectEqualStrings(expect, list.items);
+test {
+    testing.refAllDecls(@This());
 }

@@ -1,9 +1,11 @@
 const std = @import("std");
-const build_options = @import("build_options");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const stderr = std.io.getStdErr();
 
+const build_options = @import("build_options");
+const Context = @import("Context.zig");
+const Module = @import("module.zig").Module;
 const bytecode = @import("bytecode.zig");
 const Chunk = bytecode.Chunk;
 const OpCode = bytecode.OpCode;
@@ -11,16 +13,6 @@ const value = @import("value.zig");
 const Value = value.Value;
 const ValueType = value.ValueType;
 
-// const InterpretError = blk: {
-//     var ErrorSet = CompileError || RuntimeError || std.os.WriteError;
-//     if (build_options.exec_tracing and Writer.Error != std.os.WriteError) {
-//         ErrorSet = ErrorSet || Writer.Error;
-//     }
-//     break :blk ErrorSet;
-// };
-// TODO: Moving these errors outside VirtMach function so that they can be accessed in other scopes
-// no longer adds vm `Writer.Error` to `InterpretError` when project was built with execution
-// tracing enabled.
 const InterpretError = CompileError || RuntimeError || std.os.WriteError;
 const CompileError = error{
     Placeholder,
@@ -31,12 +23,15 @@ const TypeError = error{
     BinOp,
 };
 
+// TODO: Replace `VirtMach` with its inner struct where all uses of `writer` have been replaced with
+// `std.log.info`
 pub fn VirtMach(comptime Writer: type) type {
     return struct {
         const Self = @This();
 
         const stack_size = 50;
 
+        context: *Context = undefined,
         writer: Writer = undefined,
         // TODO: Grow stack when it is full instead of overflowing?
         stack: [stack_size]Value = [_]Value{Value.init(0)} ** stack_size,
@@ -44,20 +39,23 @@ pub fn VirtMach(comptime Writer: type) type {
         chunk: *Chunk = undefined,
         // ip: [*]u8 = undefined,
 
-        pub fn init(self: *Self, writer: Writer) void {
-            self.sp = &self.stack;
+        pub fn init(self: *Self, writer: Writer, ctx: *Context) void {
             self.writer = writer;
+            self.context = ctx;
+            self.sp = &self.stack;
         }
 
         pub fn emptyStack(self: *Self) void {
             self.sp = &self.stack;
         }
 
+        // pub fn interpret(self: *Self, module: *Module) InterpretError!void {
         pub fn interpret(self: *Self, chunk: *Chunk) InterpretError!void {
             //  try self.writer.print("{*} {*}\n", .{ self.sp, &self.stack[0] });
-            self.chunk = chunk;
+            // self.chunk = chunk;
             // self.sp = &self.stack;
             // self.ip = self.chunk.code.elems.ptr;
+            self.chunk = chunk;
             return self.run();
         }
 
@@ -77,6 +75,7 @@ pub fn VirtMach(comptime Writer: type) type {
                 instruction = @intToEnum(OpCode, readByte(&ip));
                 switch (instruction) {
                     .ret => {
+                        // _ = self.pop();
                         std.debug.print("returned: {}\n", .{self.pop()});
                         return;
                     },
@@ -84,11 +83,10 @@ pub fn VirtMach(comptime Writer: type) type {
                         //self.push(self.readConstant(&ip));
                         var val = self.readConstant(&ip);
                         self.push(val);
-                        // break;
                     },
-                    .nil => self.push(Value.init({})),
-                    .@"true" => self.push(Value.init(true)),
-                    .@"false" => self.push(Value.init(false)),
+                    .nil => self.push(comptime Value.init({})),
+                    .@"true" => self.push(comptime Value.init(true)),
+                    .@"false" => self.push(comptime Value.init(false)),
                     .add => try self.binOp(ip, .add),
                     .sub => try self.binOp(ip, .sub),
                     .mul => try self.binOp(ip, .mul),
@@ -110,14 +108,14 @@ pub fn VirtMach(comptime Writer: type) type {
                     },
                     .neg => {
                         var stacktop = @ptrCast(*Value, self.sp - 1);
-                        try self.checkOperandType(ip, stacktop.*, ValueType.number);
+                        try self.checkOperandType(ip, stacktop.*, .number);
                         // Equivalent to `push(-pop())`.
                         stacktop.set(-stacktop.asNumber());
                     },
                     .not => {
                         var stacktop = @ptrCast(*Value, self.sp - 1);
                         // Equivalent to `push(!pop())`.
-                        stacktop.set(stacktop.isFalsey());
+                        stacktop.* = Value.init(stacktop.isFalsey());
                     },
                     else => std.debug.panic("invalid bytecode opcode: {}", .{instruction}),
                 }
@@ -179,7 +177,7 @@ pub fn VirtMach(comptime Writer: type) type {
                 return self.interpretError(
                     TypeError.UnOp,
                     ip,
-                    .{ ValueType.number, operand.type() },
+                    .{ .number, operand.type() },
                 );
             }
         }
@@ -191,21 +189,13 @@ pub fn VirtMach(comptime Writer: type) type {
             args: anytype,
         ) InterpretError {
             const TTY = std.debug.TTY;
-            const config = std.debug.detectTTYConfig();
-            TTY.Config.setColor(config, stderr, TTY.Color.Bold);
-            TTY.Config.setColor(config, stderr, TTY.Color.Red);
+            TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Bold);
+            TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Red);
             try stderr.writeAll("error: ");
-            TTY.Config.setColor(config, stderr, TTY.Color.Reset);
+            TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Reset);
 
             const writer = stderr.writer();
             switch (err) {
-                // "expected an operand of numeric type, but found bool"
-                // "expected operand with number type, but found bool"
-                // "expected numeric operand but found {}",
-                // RuntimeError.InvalidType => try writer.print(
-                //     "expected {s} of type {} but found {}\n",
-                //     args,
-                // ),
                 TypeError.UnOp => try writer.print(
                     "expected {} operand but found {}\n",
                     args,
@@ -217,7 +207,6 @@ pub fn VirtMach(comptime Writer: type) type {
                 else => {},
             }
             try writer.print("[line {d}] in script\n", .{self.chunk.lineOfInstr(ip - 1)});
-            // try writer.print("[line {d}] in script\n", .{self.chunk.line_info.getLineFromOffset(self.chunk.offsetOfAddr(ip - 1))});
             return err;
         }
     };
@@ -225,36 +214,34 @@ pub fn VirtMach(comptime Writer: type) type {
 
 test "arithmetic operators" {
     const stdout = std.io.getStdOut();
+    const gpa = std.testing.allocator;
+    var context = try Context.init(gpa, .{ .main_file_path = null });
+    defer context.deinit();
     var vm = VirtMach(std.fs.File.Writer){};
-    vm.init(stdout.writer());
+    vm.init(stdout.writer(), &context);
 
     // `-((1.2 + 3.4) / 2)` == `-2.3`
     {
         var chunk = Chunk.init(testing.allocator);
         defer chunk.deinit();
-        try chunk.writeOpCode(.constant, 1);
-        try chunk.write(try chunk.addConstant(Value.init(1.2)), 1);
-        try chunk.writeOpCode(.constant, 1);
-        try chunk.write(try chunk.addConstant(Value.init(3.4)), 1);
-        try chunk.writeOpCode(.add, 1);
-        try chunk.writeOpCode(.constant, 1);
-        try chunk.write(try chunk.addConstant(Value.init(2)), 1);
-        try chunk.writeOpCode(.div, 1);
-        try chunk.writeOpCode(.neg, 1);
-        try chunk.writeOpCode(.ret, 2);
-        try chunk.writeOpCode(.ret, 3);
+        try chunk.fill(comptime .{
+            Value.init(1.2),
+            Value.init(3.4),
+            .add,
+            Value.init(2),
+            .div,
+            .neg,
+            .ret,
+        });
         try vm.interpret(&chunk);
-        try testing.expectEqual(@as(f64, -2.3), vm.stack[0].asNumber());
+        try testing.expectEqual(@as(f64, -2.3), vm.sp[0].asNumber());
     }
 
     // `-true` results in a type error
     {
         var chunk = Chunk.init(testing.allocator);
         defer chunk.deinit();
-        try chunk.writeOpCode(.constant, 1);
-        try chunk.write(try chunk.addConstant(Value.init(true)), 1);
-        try chunk.writeOpCode(.neg, 1);
-        try chunk.writeOpCode(.ret, 1);
+        try chunk.fill(comptime .{ Value.init(true), .neg, .ret });
         try testing.expectError(TypeError.UnOp, vm.interpret(&chunk));
     }
 
@@ -262,15 +249,48 @@ test "arithmetic operators" {
     {
         var chunk = Chunk.init(testing.allocator);
         defer chunk.deinit();
-        const lhs = Value.init(2.5);
-        const rhs = Value.init(false);
-        try chunk.writeOpCode(.constant, 1);
-        try chunk.write(try chunk.addConstant(lhs), 1);
-        try chunk.writeOpCode(.constant, 1);
-        try chunk.write(try chunk.addConstant(rhs), 1);
-        try chunk.writeOpCode(.add, 1);
+        const lhs = comptime Value.init(2.5);
+        const rhs = comptime Value.init(false);
+        try chunk.fill(.{ lhs, rhs, .add });
         try testing.expectError(TypeError.BinOp, vm.interpret(&chunk));
         try testing.expectEqual(vm.peek(0), rhs);
         try testing.expectEqual(vm.peek(1), lhs);
+    }
+}
+
+test "boolean operators" {
+    const stdout = std.io.getStdOut();
+    const gpa = std.testing.allocator;
+    var context = try Context.init(gpa, .{ .main_file_path = null });
+    defer context.deinit();
+    var vm = VirtMach(std.fs.File.Writer){};
+    vm.init(stdout.writer(), &context);
+
+    // `!true` == `false`
+    {
+        var chunk = Chunk.init(testing.allocator);
+        defer chunk.deinit();
+        try chunk.fill(.{ .@"true", .not, .ret });
+        try vm.interpret(&chunk);
+        try testing.expectEqual(false, vm.sp[0].asBool());
+    }
+
+    // `!false` == `true`
+    {
+        var chunk = Chunk.init(testing.allocator);
+        defer chunk.deinit();
+        try chunk.fill(.{ .@"false", .not, .ret });
+        try vm.interpret(&chunk);
+        try testing.expectEqual(true, vm.sp[0].asBool());
+    }
+
+    // `!0` == `true`
+    {
+        var chunk = Chunk.init(testing.allocator);
+        defer chunk.deinit();
+
+        try chunk.fill(comptime .{ Value.init(0), .not, .ret });
+        try vm.interpret(&chunk);
+        try testing.expectEqual(true, vm.sp[0].asBool());
     }
 }

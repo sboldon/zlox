@@ -1,10 +1,5 @@
 const std = @import("std");
 
-// TODO: Add a build option that enables execution tracing. If set, traces will be written to
-// std out. If set and an argument is provided, treat the argument as the filename of a log file.
-// Every time vm is ran, a timestamped execution trace with the file name that the vm was invoked
-// with is appeneded to the output stream.
-
 pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
@@ -14,12 +9,12 @@ pub fn build(b: *std.build.Builder) void {
         bool,
         "exec-tracing",
         "Enable VM execution traces",
-    ) orelse true;
+    ) orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "exec_tracing", tracing_enabled);
 
-    const exe = b.addExecutable("zlox", "src/main.zig");
+    const exe = b.addExecutable("lox", "src/main.zig");
     exe.addOptions("build_options", options);
     const opt_asm_path = b.option([]const u8, "emit-asm", "Output .s (assembly code)");
     if (opt_asm_path) |path| {
