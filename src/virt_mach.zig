@@ -14,211 +14,204 @@ const Value = value.Value;
 const ValueType = value.ValueType;
 
 const InterpretError = CompileError || RuntimeError || std.os.WriteError;
-const CompileError = error{
-    Placeholder,
-};
+const CompileError = error{Placeholder};
 const RuntimeError = TypeError;
 const TypeError = error{
     UnOp,
     BinOp,
 };
 
-// TODO: Replace `VirtMach` with its inner struct where all uses of `writer` have been replaced with
-// `std.log.info`
-pub fn VirtMach(comptime Writer: type) type {
-    return struct {
-        const Self = @This();
+pub const VirtMach = struct {
+    const Self = @This();
 
-        const stack_size = 50;
+    // TODO: Grow stack when it is full instead of overflowing?
+    const stack_size = 50;
 
-        context: *Context = undefined,
-        writer: Writer = undefined,
-        // TODO: Grow stack when it is full instead of overflowing?
-        stack: [stack_size]Value = [_]Value{Value.init(0)} ** stack_size,
-        sp: [*]Value = undefined,
-        chunk: *Chunk = undefined,
-        // ip: [*]u8 = undefined,
+    context: *Context,
+    stack: [stack_size]Value = [_]Value{Value.init(0)} ** stack_size,
+    sp: [*]Value = undefined,
+    chunk: *Chunk = undefined,
+    // ip: [*]u8 = undefined,
 
-        pub fn init(self: *Self, writer: Writer, ctx: *Context) void {
-            self.writer = writer;
-            self.context = ctx;
-            self.sp = &self.stack;
-        }
+    pub fn init(ctx: *Context) Self {
+        return .{ .context = ctx };
+    }
 
-        pub fn emptyStack(self: *Self) void {
-            self.sp = &self.stack;
-        }
+    /// This must be called before the first call to `interpret`.
+    pub fn resetStack(self: *Self) void {
+        self.sp = &self.stack;
+    }
 
-        // pub fn interpret(self: *Self, module: *Module) InterpretError!void {
-        pub fn interpret(self: *Self, chunk: *Chunk) InterpretError!void {
-            //  try self.writer.print("{*} {*}\n", .{ self.sp, &self.stack[0] });
-            // self.chunk = chunk;
-            // self.sp = &self.stack;
-            // self.ip = self.chunk.code.elems.ptr;
-            self.chunk = chunk;
-            return self.run();
-        }
+    // pub fn interpret(self: *Self, module: *Module) InterpretError!void {
+    pub fn interpret(self: *Self, chunk: *Chunk) InterpretError!void {
+        //  try self.writer.print("{*} {*}\n", .{ self.sp, &self.stack[0] });
+        // self.chunk = chunk;
+        // self.sp = &self.stack;
+        // self.ip = self.chunk.code.elems.ptr;
+        self.chunk = chunk;
+        return self.run();
+    }
 
-        // TODO: Rewrite bytecode dispatch using a direct threaded approach once the accepted proposal
-        // for labeled continue syntax inside a switch expression is implemented.
-        fn run(self: *Self) InterpretError!void {
-            var ip: [*]u8 = self.chunk.code.elems.ptr;
-            var instruction: OpCode = undefined;
-            while (true) {
-                if (comptime build_options.exec_tracing) {
-                    for (self.stack) |val| {
-                        try self.writer.print("[ {} ]", .{val});
-                    }
-                    try self.writer.print("\n", .{});
-                    _ = try self.chunk.disassembleInstr(self.writer, self.chunk.offsetOfAddr(ip));
+    // TODO: Rewrite bytecode dispatch using a direct threaded approach once the accepted proposal
+    // for labeled continue syntax inside a switch expression is implemented.
+    fn run(self: *Self) InterpretError!void {
+        var ip: [*]u8 = self.chunk.code.elems.ptr;
+        var instruction: OpCode = undefined;
+        while (true) {
+            if (comptime build_options.exec_tracing) {
+                const writer = stderr.writer();
+                try writer.writeAll("\nVM stack contents: ");
+                for (self.stack) |val| {
+                    try writer.print("[ {} ]", .{val});
                 }
-                instruction = @intToEnum(OpCode, readByte(&ip));
-                switch (instruction) {
-                    .ret => {
-                        // _ = self.pop();
-                        std.debug.print("returned: {}\n", .{self.pop()});
-                        return;
-                    },
-                    .constant => {
-                        //self.push(self.readConstant(&ip));
-                        var val = self.readConstant(&ip);
-                        self.push(val);
-                    },
-                    .nil => self.push(comptime Value.init({})),
-                    .@"true" => self.push(comptime Value.init(true)),
-                    .@"false" => self.push(comptime Value.init(false)),
-                    .add => try self.binOp(ip, .add),
-                    .sub => try self.binOp(ip, .sub),
-                    .mul => try self.binOp(ip, .mul),
-                    .div => try self.binOp(ip, .div),
-                    .gt => try self.binOp(ip, .gt),
-                    .ge => try self.binOp(ip, .ge),
-                    .lt => try self.binOp(ip, .lt),
-                    .le => try self.binOp(ip, .le),
-                    .eq => {
-                        // It is not possible for an equality operation to fail type checking.
-                        const rhs = self.pop();
-                        const lhs = self.pop();
-                        self.push(lhs.binOp(.eq, rhs));
-                    },
-                    .neq => {
-                        const rhs = self.pop();
-                        const lhs = self.pop();
-                        self.push(lhs.binOp(.neq, rhs));
-                    },
-                    .neg => {
-                        var stacktop = @ptrCast(*Value, self.sp - 1);
-                        try self.checkOperandType(ip, stacktop.*, .number);
-                        // Equivalent to `push(-pop())`.
-                        stacktop.set(-stacktop.asNumber());
-                    },
-                    .not => {
-                        var stacktop = @ptrCast(*Value, self.sp - 1);
-                        // Equivalent to `push(!pop())`.
-                        stacktop.* = Value.init(stacktop.isFalsey());
-                    },
-                    else => std.debug.panic("invalid bytecode opcode: {}", .{instruction}),
-                }
+                try writer.writeAll("\ncurrent instruction: ");
+                _ = try self.chunk.disassembleInstr(writer, self.chunk.offsetOfAddr(ip));
+            }
+            instruction = @intToEnum(OpCode, readByte(&ip));
+            switch (instruction) {
+                .ret => {
+                    // _ = self.pop();
+                    std.debug.print("evaluates to: {}\n", .{self.pop()});
+                    return;
+                },
+                .constant => {
+                    //self.push(self.readConstant(&ip));
+                    var val = self.readConstant(&ip);
+                    self.push(val);
+                },
+                .nil => self.push(comptime Value.init({})),
+                .@"true" => self.push(comptime Value.init(true)),
+                .@"false" => self.push(comptime Value.init(false)),
+                .add => try self.binOp(ip, .add),
+                .sub => try self.binOp(ip, .sub),
+                .mul => try self.binOp(ip, .mul),
+                .div => try self.binOp(ip, .div),
+                .gt => try self.binOp(ip, .gt),
+                .ge => try self.binOp(ip, .ge),
+                .lt => try self.binOp(ip, .lt),
+                .le => try self.binOp(ip, .le),
+                .eq => {
+                    // No typechecking is required because equality is defined over all types.
+                    const rhs = self.pop();
+                    const lhs = self.pop();
+                    self.push(lhs.binOp(.eq, rhs));
+                },
+                .neq => {
+                    const rhs = self.pop();
+                    const lhs = self.pop();
+                    self.push(lhs.binOp(.neq, rhs));
+                },
+                .neg => {
+                    var stacktop = @ptrCast(*Value, self.sp - 1);
+                    try self.checkOperandType(ip, stacktop.*, .number);
+                    // Equivalent to `push(-pop())`.
+                    stacktop.set(-stacktop.asNumber());
+                },
+                .not => {
+                    var stacktop = @ptrCast(*Value, self.sp - 1);
+                    // Equivalent to `push(!pop())`.
+                    stacktop.* = Value.init(stacktop.isFalsey());
+                },
+                else => std.debug.panic("invalid bytecode opcode: {}", .{instruction}),
             }
         }
+    }
 
-        inline fn push(self: *Self, val: Value) void {
-            // TODO: This currently will write past the end of the stack like it's nbd.
-            self.sp[0] = val;
-            self.sp += 1;
+    inline fn push(self: *Self, val: Value) void {
+        // TODO: This currently will write past the end of the stack like it's nbd.
+        self.sp[0] = val;
+        self.sp += 1;
+    }
+
+    inline fn pop(self: *Self) Value {
+        self.sp -= 1;
+        return self.sp[0];
+    }
+
+    inline fn peek(self: Self, distance: usize) Value {
+        return (self.sp - 1 - distance)[0]; // Top of the stack is at `self.sp - 1`.
+    }
+
+    // TODO: Check generated code to see if inlining removes superfluous deref of ip. If it does
+    // not, then there does not appear to be much of a benefit to having the instruction pointer
+    // as an local variable instead of as a member of VirtMach.
+    inline fn readByte(ip: *[*]const u8) u8 {
+        const byte = ip.*[0];
+        ip.* += 1;
+        return byte;
+    }
+
+    inline fn readConstant(self: Self, ip: *[*]u8) Value {
+        return self.chunk.data.elems[readByte(ip)];
+    }
+
+    fn binOp(self: *Self, ip: [*]const u8, comptime op: OpCode) InterpretError!void {
+        const rhs = self.pop();
+        const lhs = self.pop();
+        if (bytecode.validOperandTypes(op).contains(lhs.type()) and rhs.type() == lhs.type()) {
+            self.push(lhs.binOp(op, rhs));
+        } else {
+            // Push operands back onto the stack to make them visible to the GC.
+            self.push(lhs);
+            self.push(rhs);
+            return self.interpretError(
+                TypeError.BinOp,
+                ip,
+                .{ bytecode.opCodeLexeme(op), lhs.type(), rhs.type() },
+            );
         }
+    }
 
-        inline fn pop(self: *Self) Value {
-            self.sp -= 1;
-            return self.sp[0];
+    fn checkOperandType(
+        self: Self,
+        ip: [*]const u8,
+        operand: Value,
+        expected_type: ValueType,
+    ) InterpretError!void {
+        if (operand.type() != expected_type) {
+            return self.interpretError(
+                TypeError.UnOp,
+                ip,
+                .{ .number, operand.type() },
+            );
         }
+    }
 
-        inline fn peek(self: Self, distance: usize) Value {
-            return (self.sp - 1 - distance)[0]; // Top of the stack is at `self.sp - 1`.
+    fn interpretError(
+        self: Self,
+        comptime err: InterpretError,
+        ip: [*]const u8,
+        args: anytype,
+    ) InterpretError {
+        const TTY = std.debug.TTY;
+        TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Bold);
+        TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Red);
+        try stderr.writeAll("error: ");
+        TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Reset);
+
+        const writer = stderr.writer();
+        switch (err) {
+            TypeError.UnOp => try writer.print(
+                "expected {} operand but found {}\n",
+                args,
+            ),
+            TypeError.BinOp => try writer.print(
+                "invalid operand types for {s} operator: {} and {}\n",
+                args,
+            ),
+            else => {},
         }
-
-        // TODO: Check generated code to see if inlining removes superfluous deref of ip. If it does
-        // not, then there does not appear to be much of a benefit to having the instruction pointer
-        // as an local variable instead of as a member of VirtMach.
-        inline fn readByte(ip: *[*]const u8) u8 {
-            const byte = ip.*[0];
-            ip.* += 1;
-            return byte;
-        }
-
-        inline fn readConstant(self: Self, ip: *[*]u8) Value {
-            return self.chunk.data.elems[readByte(ip)];
-        }
-
-        fn binOp(self: *Self, ip: [*]const u8, comptime op: OpCode) InterpretError!void {
-            const rhs = self.pop();
-            const lhs = self.pop();
-            if (bytecode.validOperandTypes(op).contains(lhs.type()) and rhs.type() == lhs.type()) {
-                self.push(lhs.binOp(op, rhs));
-            } else {
-                // Push operands back onto the stack to make them visible to the GC.
-                self.push(lhs);
-                self.push(rhs);
-                return self.interpretError(
-                    TypeError.BinOp,
-                    ip,
-                    .{ bytecode.opCodeLexeme(op), lhs.type(), rhs.type() },
-                );
-            }
-        }
-
-        fn checkOperandType(
-            self: Self,
-            ip: [*]const u8,
-            operand: Value,
-            expected_type: ValueType,
-        ) InterpretError!void {
-            if (operand.type() != expected_type) {
-                return self.interpretError(
-                    TypeError.UnOp,
-                    ip,
-                    .{ .number, operand.type() },
-                );
-            }
-        }
-
-        fn interpretError(
-            self: Self,
-            comptime err: InterpretError,
-            ip: [*]const u8,
-            args: anytype,
-        ) InterpretError {
-            const TTY = std.debug.TTY;
-            TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Bold);
-            TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Red);
-            try stderr.writeAll("error: ");
-            TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Reset);
-
-            const writer = stderr.writer();
-            switch (err) {
-                TypeError.UnOp => try writer.print(
-                    "expected {} operand but found {}\n",
-                    args,
-                ),
-                TypeError.BinOp => try writer.print(
-                    "invalid operand types for {s} operator: {} and {}\n",
-                    args,
-                ),
-                else => {},
-            }
-            try writer.print("[line {d}] in script\n", .{self.chunk.lineOfInstr(ip - 1)});
-            return err;
-        }
-    };
-}
+        try writer.print("[line {d}] in script\n", .{self.chunk.lineOfInstr(ip - 1)});
+        return err;
+    }
+};
 
 test "arithmetic operators" {
-    const stdout = std.io.getStdOut();
     const gpa = std.testing.allocator;
     var context = try Context.init(gpa, .{ .main_file_path = null });
     defer context.deinit();
-    var vm = VirtMach(std.fs.File.Writer){};
-    vm.init(stdout.writer(), &context);
+    var vm = VirtMach.init(&context);
+    vm.resetStack();
 
     // `-((1.2 + 3.4) / 2)` == `-2.3`
     {
@@ -259,12 +252,11 @@ test "arithmetic operators" {
 }
 
 test "boolean operators" {
-    const stdout = std.io.getStdOut();
     const gpa = std.testing.allocator;
     var context = try Context.init(gpa, .{ .main_file_path = null });
     defer context.deinit();
-    var vm = VirtMach(std.fs.File.Writer){};
-    vm.init(stdout.writer(), &context);
+    var vm = VirtMach.init(&context);
+    vm.resetStack();
 
     // `!true` == `false`
     {

@@ -20,13 +20,12 @@ pub fn parseArgs(args: []const []u8) Context.Options {
             // TODO: This will result in main's deferred statements not being called, is it alright to just let
             // OS handle mem cleanup?
             std.log.err("usage: lox [path]\n", .{});
-            std.process.exit(64); // Command line usage error.
+            std.process.exit(64); // Command line usage error code.
         },
     };
 }
 
 pub fn main() anyerror!u8 {
-    const stdout = std.io.getStdOut().writer();
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = gpa_instance.allocator();
 
@@ -37,11 +36,11 @@ pub fn main() anyerror!u8 {
     var context = try Context.init(gpa, config);
     defer context.deinit();
 
-    var vm = VirtMach(std.fs.File.Writer){};
-    vm.init(stdout, &context);
+    var vm = VirtMach.init(&context);
+    vm.resetStack();
 
     if (context.main_module.is_toplevel) {
-        return try repl(gpa, context, vm);
+        return try repl(gpa, &context, &vm);
     }
 
     var module = &context.main_module;
@@ -52,13 +51,11 @@ pub fn main() anyerror!u8 {
     return 0;
 }
 
-fn repl(gpa: Allocator, context_copy: Context, vm_copy: VirtMach(std.fs.File.Writer)) !u8 {
+fn repl(gpa: Allocator, context: *Context, vm: *VirtMach) !u8 {
     const stdin = std.io.getStdIn();
-    var reader = std.io.bufferedReader(stdin.reader()).reader();
+    const reader = std.io.bufferedReader(stdin.reader()).reader();
     const stderr = std.io.getStdErr().writer();
-    var context = context_copy;
-    var vm = vm_copy;
-    var state = try ReplCompilation.init(gpa, &context);
+    var state = try ReplCompilation.init(gpa, context);
     var line = std.mem.zeroes([1024:0]u8);
 
     while (true) {
@@ -68,6 +65,7 @@ fn repl(gpa: Allocator, context_copy: Context, vm_copy: VirtMach(std.fs.File.Wri
             continue;
         }) |source_code| {
             if (std.mem.eql(u8, source_code, "exit")) {
+                // Exit using a less ad-hoc method.
                 return 0;
             }
             // `source_code` slice does not include the delimiter so it is guaranteed that the

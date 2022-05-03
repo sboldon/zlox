@@ -63,10 +63,6 @@ pub const Value = union(ValueType) {
         return @as(ValueType, self);
     }
 
-    // pub fn is_type(self: Self, ty: ValueType) bool {
-    //     return @as(ValueType, self) == ty;
-    // }
-
     pub fn asNumber(self: Self) f64 {
         return self.number;
     }

@@ -98,7 +98,7 @@ pub const Chunk = struct {
     fn addConstant(self: *Self, val: Value) !u8 {
         const index = self.data.elems.len;
         if (index > 255) {
-            // TODO: Support a greater number of constants by adding new opcode with 2 two byte
+            // TODO: Support a greater number of constants by adding new opcode with two byte
             // indices.
             std.debug.panic(
                 "Attempted to add a constant to a full chunk. Currently only 256 constants can " ++
