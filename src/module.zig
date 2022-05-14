@@ -62,7 +62,7 @@ pub const Module = struct {
         self.sub_path = try self.gpa.dupe(u8, sub_path);
     }
 
-    /// The returned pointer may be invalidated after additional calls to the function.
+    /// The returned pointer may be invalidated after additional invocations.
     pub fn newChunk(self: *Self) error{OutOfMemory}!*Chunk {
         try self.bytecode.append(Chunk.init(self.gpa));
         return self.bytecode.end();

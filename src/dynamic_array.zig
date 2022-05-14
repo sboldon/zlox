@@ -39,8 +39,12 @@ pub fn DynamicArray(comptime T: type) type {
             std.mem.copy(T, self.elems[len..], slice);
         }
 
+        // fn ToSliceRetType(self: anytype) type {
+
+        // }
+
         /// The slice may be become invalid if it is used after additional elements have been
-        /// appended.
+        /// appended. `self` must be of type `*const Self` or `*Self`.
         pub fn toSlice(self: *Self) []T {
             return self.elems;
         }

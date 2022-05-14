@@ -12,11 +12,15 @@ const OpCode = bytecode.OpCode;
 const value = @import("value.zig");
 const Value = value.Value;
 const ValueType = value.ValueType;
+const Obj = @import("object.zig").Obj;
+const StringObj = @import("object.zig").StringObj;
 
-const InterpretError = CompileError || RuntimeError || std.os.WriteError;
+const writeAllColor = @import("main.zig").writeAllColor;
+
+const InterpretError = CompileError || RuntimeError || std.os.WriteError || error{OutOfMemory};
 const CompileError = error{Placeholder};
 const RuntimeError = TypeError;
-const TypeError = error{
+pub const TypeError = error{
     UnOp,
     BinOp,
 };
@@ -25,9 +29,12 @@ pub const VirtMach = struct {
     const Self = @This();
 
     // TODO: Grow stack when it is full instead of overflowing?
-    const stack_size = 50;
+    const stack_size = 64;
 
+    // gpa: Allocator,
     context: *Context,
+
+    // objs: std.SinglyLinkedList
     stack: [stack_size]Value = [_]Value{Value.init(0)} ** stack_size,
     sp: [*]Value = undefined,
     chunk: *Chunk = undefined,
@@ -53,19 +60,13 @@ pub const VirtMach = struct {
     }
 
     // TODO: Rewrite bytecode dispatch using a direct threaded approach once the accepted proposal
-    // for labeled continue syntax inside a switch expression is implemented.
+    // for labeled continue syntax inside a switch expression is implemented (issue #8220).
     fn run(self: *Self) InterpretError!void {
         var ip: [*]u8 = self.chunk.code.elems.ptr;
         var instruction: OpCode = undefined;
         while (true) {
             if (comptime build_options.exec_tracing) {
-                const writer = stderr.writer();
-                try writer.writeAll("\nVM stack contents: ");
-                for (self.stack) |val| {
-                    try writer.print("[ {} ]", .{val});
-                }
-                try writer.writeAll("\ncurrent instruction: ");
-                _ = try self.chunk.disassembleInstr(writer, self.chunk.offsetOfAddr(ip));
+                try self.trace(ip);
             }
             instruction = @intToEnum(OpCode, readByte(&ip));
             switch (instruction) {
@@ -90,17 +91,19 @@ pub const VirtMach = struct {
                 .ge => try self.binOp(ip, .ge),
                 .lt => try self.binOp(ip, .lt),
                 .le => try self.binOp(ip, .le),
-                .eq => {
-                    // No typechecking is required because equality is defined over all types.
-                    const rhs = self.pop();
-                    const lhs = self.pop();
-                    self.push(lhs.binOp(.eq, rhs));
-                },
-                .neq => {
-                    const rhs = self.pop();
-                    const lhs = self.pop();
-                    self.push(lhs.binOp(.neq, rhs));
-                },
+                .eq => try self.binOp(ip, .eq),
+                .neq => try self.binOp(ip, .neq),
+                // .eq => {
+                //     // No typechecking is required because equality is defined over all types.
+                //     const rhs = self.pop();
+                //     const lhs = self.pop();
+                //     self.push(try Value.binOp(self.context.gpa, lhs, .eq, rhs));
+                // },
+                // .neq => {
+                //     const rhs = self.pop();
+                //     const lhs = self.pop();
+                //     self.push(try Value.binOp(self.context.gpa, lhs, .neq, rhs));
+                // },
                 .neg => {
                     var stacktop = @ptrCast(*Value, self.sp - 1);
                     try self.checkOperandType(ip, stacktop.*, .number);
@@ -114,6 +117,57 @@ pub const VirtMach = struct {
                 },
                 else => std.debug.panic("invalid bytecode opcode: {}", .{instruction}),
             }
+        }
+    }
+
+    fn binOp(self: *Self, ip: [*]const u8, comptime op: OpCode) InterpretError!void {
+        const rhs = self.pop();
+        const lhs = self.pop();
+        const val = switch (op) {
+            .add => if (lhs.type() == .number and rhs.type() == .number)
+                Value.init(lhs.number + rhs.number)
+            else if (lhs.isObjType(.string) and rhs.isObjType(.string)) blk: {
+                const string_obj =
+                    try StringObj.concat(self.context.gpa, lhs.obj.asString(), rhs.obj.asString());
+                const obj = string_obj.asObj();
+                self.context.trackObj(obj);
+                break :blk Value.init(obj);
+            } else TypeError.BinOp,
+            .sub => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number - rhs.number) else TypeError.BinOp,
+            .mul => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number * rhs.number) else TypeError.BinOp,
+            .div => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number / rhs.number) else TypeError.BinOp,
+            .gt => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number > rhs.number) else TypeError.BinOp,
+            .ge => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number >= rhs.number) else TypeError.BinOp,
+            .lt => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number < rhs.number) else TypeError.BinOp,
+            .le => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number <= rhs.number) else TypeError.BinOp,
+            .eq => @as(anyerror!Value, Value.init(lhs.isEqual(rhs))), // No error possible.
+            .neq => @as(anyerror!Value, Value.init(!lhs.isEqual(rhs))), // No error possible.
+            else => @compileError("invalid binary operator: " ++ @tagName(op)),
+        } catch {
+            // Push operands back onto the stack to make them visible to the GC.
+            self.push(lhs);
+            self.push(rhs);
+            return self.interpretError(
+                TypeError.BinOp,
+                ip,
+                .{ op.lexeme(), lhs.type(), rhs.type() },
+            );
+        };
+        self.push(val);
+    }
+
+    fn checkOperandType(
+        self: Self,
+        ip: [*]const u8,
+        operand: Value,
+        expected_type: ValueType,
+    ) InterpretError!void {
+        if (operand.type() != expected_type) {
+            return self.interpretError(
+                TypeError.UnOp,
+                ip,
+                .{ ValueType.number, operand.type() },
+            );
         }
     }
 
@@ -145,51 +199,15 @@ pub const VirtMach = struct {
         return self.chunk.data.elems[readByte(ip)];
     }
 
-    fn binOp(self: *Self, ip: [*]const u8, comptime op: OpCode) InterpretError!void {
-        const rhs = self.pop();
-        const lhs = self.pop();
-        if (bytecode.validOperandTypes(op).contains(lhs.type()) and rhs.type() == lhs.type()) {
-            self.push(lhs.binOp(op, rhs));
-        } else {
-            // Push operands back onto the stack to make them visible to the GC.
-            self.push(lhs);
-            self.push(rhs);
-            return self.interpretError(
-                TypeError.BinOp,
-                ip,
-                .{ bytecode.opCodeLexeme(op), lhs.type(), rhs.type() },
-            );
-        }
-    }
-
-    fn checkOperandType(
-        self: Self,
-        ip: [*]const u8,
-        operand: Value,
-        expected_type: ValueType,
-    ) InterpretError!void {
-        if (operand.type() != expected_type) {
-            return self.interpretError(
-                TypeError.UnOp,
-                ip,
-                .{ .number, operand.type() },
-            );
-        }
-    }
-
     fn interpretError(
         self: Self,
         comptime err: InterpretError,
         ip: [*]const u8,
         args: anytype,
     ) InterpretError {
-        const TTY = std.debug.TTY;
-        TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Bold);
-        TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Red);
-        try stderr.writeAll("error: ");
-        TTY.Config.setColor(self.context.tty_config, stderr, TTY.Color.Reset);
-
-        const writer = stderr.writer();
+        const Color = std.debug.TTY.Color;
+        try writeAllColor(self.context.tty_config, Color.Red, Color.Bold, "error: ");
+        const writer = std.io.getStdErr().writer();
         switch (err) {
             TypeError.UnOp => try writer.print(
                 "expected {} operand but found {}\n",
@@ -203,6 +221,17 @@ pub const VirtMach = struct {
         }
         try writer.print("[line {d}] in script\n", .{self.chunk.lineOfInstr(ip - 1)});
         return err;
+    }
+
+    fn trace(self: *Self, ip: [*]u8) !void {
+        const writer = stderr.writer();
+        try writer.writeAll("\nVM stack contents: ");
+        for (self.stack) |val, i| {
+            if (i & 31 == 0) try writer.writeAll("\n");
+            try writer.print("[ {} ]", .{val});
+        }
+        try writer.writeAll("\ncurrent instruction: ");
+        _ = try self.chunk.disassembleInstr(writer, self.chunk.offsetOfAddr(ip));
     }
 };
 
@@ -228,6 +257,20 @@ test "arithmetic operators" {
         });
         try vm.interpret(&chunk);
         try testing.expectEqual(@as(f64, -2.3), vm.sp[0].asNumber());
+    }
+
+    // `"hello" + "world"` == `"helloworld"`
+    {
+        var chunk = Chunk.init(testing.allocator);
+        defer chunk.deinit();
+
+        try chunk.fill(comptime blk: {
+            var s1 = StringObj.init("hello");
+            var s2 = StringObj.init("world");
+            break :blk .{ Value.init((&s1).asObj()), Value.init((&s2).asObj()), .add, .ret };
+        });
+        try vm.interpret(&chunk);
+        try testing.expectEqualStrings("helloworld", vm.sp[0].asObj().asString().bytes());
     }
 
     // `-true` results in a type error

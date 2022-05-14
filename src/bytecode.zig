@@ -10,6 +10,8 @@ const ValueType = value.ValueType;
 // Underscore denotes an open enum meaning that @intToEnum on an int not in the enum can be matched against
 // with '_' in switch statements.
 pub const OpCode = enum(u8) {
+    const Self = @This();
+
     constant, // 2 byte instruction; opcode is followed by an index into the data section of a chunk.
     ret,
     nil,
@@ -28,31 +30,32 @@ pub const OpCode = enum(u8) {
     neg,
     not,
     _,
+
+    pub fn validOperandType(comptime self: Self, val: Value) bool {
+        return switch (self) {
+            .add => val.type() == .number or val.isObjType(.string),
+            .sub, .mul, .div => val.type() == .number,
+            .gt, .ge, .lt, .le => val.type() == .number, // Should these be supported for strings?
+            else => @compileError("invalid opcode: " ++ @tagName(self)),
+        };
+    }
+
+    pub fn lexeme(comptime self: Self) []const u8 {
+        return switch (self) {
+            .add => "+",
+            .sub => "-",
+            .mul => "*",
+            .div => "/",
+            .gt => ">",
+            .ge => ">=",
+            .lt => "<",
+            .le => "<=",
+            .eq => "==",
+            .neq => "!=",
+            else => @compileError("invalid opcode: " ++ @tagName(self)),
+        };
+    }
 };
-
-pub fn validOperandTypes(comptime op: OpCode) value.TypeSet {
-    const numTypeSet = value.numTypeSet;
-    return switch (op) {
-        .add => numTypeSet, // Eventually will be valid for strings as well.
-        .sub, .mul, .div => numTypeSet,
-        .gt, .ge, .lt, .le => numTypeSet, // Should these be supported for strings?
-        else => @compileError("invalid opcode: " ++ @tagName(op)),
-    };
-}
-
-pub fn opCodeLexeme(comptime op: OpCode) []const u8 {
-    return switch (op) {
-        .add => "+",
-        .sub => "-",
-        .mul => "*",
-        .div => "/",
-        .gt => ">",
-        .ge => ">=",
-        .lt => "<",
-        .le => "<=",
-        else => @compileError("invalid opcode: " ++ @tagName(op)),
-    };
-}
 
 /// A sequence of bytecode instructions and associated constant data.
 pub const Chunk = struct {
@@ -132,7 +135,7 @@ pub const Chunk = struct {
         try writer.print("{s}", .{@tagName(op)});
         return switch (op) {
             .constant => blk: {
-                // Display the index and value of the constant.
+                // Display a constant's index into `self.data` and its value.
                 const i: u8 = self.code.elems[offset + 1];
                 try writer.print(" {} '{}'\n", .{ i, self.data.elems[i] });
                 break :blk offset + 2;
@@ -152,7 +155,7 @@ pub const Chunk = struct {
             .Int => self.line_info.getLineFromOffset(ref),
             .Pointer => self.line_info.getLineFromOffset(self.offsetOfAddr(ref)),
             else => @compileError(
-                "invalid type for `ref` argument of `Chunk.lineOfInstr` function: " ++
+                "invalid type for `ref` parameter of `Chunk.lineOfInstr` function: " ++
                     @typeName(T),
             ),
         };
@@ -172,9 +175,25 @@ pub const Chunk = struct {
     }
 
     /// Compare the instructions and constants of two chunks for equality.
-    pub fn expectEqual(expected: *Self, actual: *Self) !void {
+    pub fn testingExpectEqual(expected: *Self, actual: *Self) !void {
         try testing.expectEqualSlices(u8, expected.code.toSlice(), actual.code.toSlice());
-        try testing.expectEqualSlices(Value, expected.data.toSlice(), actual.data.toSlice());
+        // try testing.expectEqualSlices(Value, expected.data.toSlice(), actual.data.toSlice());
+        const expected_constants = expected.data.toSlice();
+        const actual_constants = actual.data.toSlice();
+        if (expected_constants.len != actual_constants.len) {
+            std.debug.print("number of constants in chunk differ. expected {d}, found {d}\n", .{
+                expected_constants.len,
+                actual_constants.len,
+            });
+            return error.TestExpectedEqual;
+        }
+        var i: usize = 0;
+        while (i < expected_constants.len) : (i += 1) {
+            expected_constants[i].testingExpectEqual(actual_constants[i]) catch {
+                std.debug.print("constant at index {} incorrect\n", .{i});
+                return error.testingExpectEqual;
+            };
+        }
     }
 
     test "disassemble" {
@@ -252,8 +271,8 @@ const LineInfo = struct {
         }
     }
 
-    /// Avoid calling getLineFromOffset for each instruction by first checking if the instruction's offset is on the
-    /// same line as the previous instruction.
+    /// Avoid calling `getLineFromOffset` for each instruction by first checking if the
+    /// instruction's offset is on the same line as the previous instruction.
     fn onSameLine(self: Self, instruct_offset: usize) bool {
         return (self.lower_bound <= instruct_offset and instruct_offset < self.upper_bound);
     }

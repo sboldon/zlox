@@ -232,6 +232,7 @@ pub const Scanner = struct {
                     },
                 },
 
+                // TODO: Should string literals be able to span multiple lines?
                 .string => switch (ch) {
                     0 => {
                         // TODO: Error message "unterminated string literal"
@@ -319,6 +320,11 @@ pub const Scanner = struct {
         try testCase("8", &.{.number_literal});
         try testCase("9", &.{.number_literal});
         try testCase("123.456.897", &.{ .number_literal, .dot, .number_literal });
+    }
+
+    test "strings" {
+        try testCase("\"\"", &.{.string_literal});
+        try testCase("\"a\"", &.{.string_literal});
     }
 
     fn testCase(source: [:0]const u8, expected: []const Token.Type) !void {

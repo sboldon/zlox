@@ -64,10 +64,6 @@ fn repl(gpa: Allocator, context: *Context, vm: *VirtMach) !u8 {
             try stderr.print("\nunable to parse input: {s}\n", .{@errorName(err)});
             continue;
         }) |source_code| {
-            if (std.mem.eql(u8, source_code, "exit")) {
-                // Exit using a less ad-hoc method.
-                return 0;
-            }
             // `source_code` slice does not include the delimiter so it is guaranteed that the
             // buffer has room for a sentinel.
             line[source_code.len] = 0;
@@ -78,10 +74,28 @@ fn repl(gpa: Allocator, context: *Context, vm: *VirtMach) !u8 {
     }
 }
 
+/// If supported by `tty_conf` write `str` to stderr using the provided color and optional emphasis.
+pub fn writeAllColor(
+    tty_conf: std.debug.TTY.Config,
+    color: std.debug.TTY.Color,
+    emphasis: ?std.debug.TTY.Color,
+    str: []const u8,
+) !void {
+    const TTY = std.debug.TTY;
+    const stderr = std.io.getStdErr();
+    TTY.Config.setColor(tty_conf, stderr, color);
+    if (emphasis) |effect| {
+        TTY.Config.setColor(tty_conf, stderr, effect);
+    }
+    try stderr.writeAll(str);
+    TTY.Config.setColor(tty_conf, stderr, TTY.Color.Reset);
+}
+
 test "suite" {
-    _ = @import("dynamic_array.zig");
     _ = @import("bytecode.zig");
-    _ = @import("virt_mach.zig");
-    _ = @import("scanner.zig");
     _ = @import("compile.zig");
+    _ = @import("dynamic_array.zig");
+    _ = @import("object.zig");
+    _ = @import("scanner.zig");
+    _ = @import("virt_mach.zig");
 }

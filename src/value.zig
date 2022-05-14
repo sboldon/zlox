@@ -1,14 +1,22 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const OpCode = @import("bytecode.zig").OpCode;
+const object = @import("object.zig");
+const ObjType = object.ObjType;
+const Obj = object.Obj;
+const StringObj = object.StringObj;
+const TypeError = @import("virt_mach.zig").TypeError;
 
 pub const ValueType = enum(u8) {
-    number,
-    @"bool",
-    nil,
-
     const Self = @This();
 
+    nil,
+    @"bool",
+    number,
+    obj,
+
+    // TODO: Have to figure out a way to print the specific object type instead of just "obj".
     pub fn format(
         self: Self,
         comptime fmt: []const u8,
@@ -16,35 +24,29 @@ pub const ValueType = enum(u8) {
         writer: anytype,
     ) !void {
         _ = fmt;
-        switch (self) {
-            .number, .@"bool", .nil => try std.fmt.formatBuf(@tagName(self), options, writer),
-        }
+        // switch (self) {
+        //     .number, .@"bool", .nil => try std.fmt.formatBuf(@tagName(self), options, writer),
+        //     .obj => |obj_type| try obj_type.format(fmt, options, writer),
+        // }
+        try std.fmt.formatBuf(@tagName(self), options, writer);
     }
 };
 
-pub const TypeSet = std.enums.EnumSet(ValueType);
-pub const numTypeSet = blk: {
-    var set = TypeSet{};
-    set.insert(ValueType.number);
-    break :blk set;
-};
-// pub const boolTypeSet = (TypeSet{}).insert(ValueType.@"bool");
-// pub const nilTypeSet = (TypeSet{}).insert(ValueType.nil);
-// pub const nonNilTypeSet = fullTypeSet.remove(ValueType.nil);
-// pub const numStrTypeSet
-
 pub const Value = union(ValueType) {
     const Self = @This();
-    number: f64,
-    @"bool": bool,
+
     nil: void,
+    @"bool": bool,
+    number: f64,
+    obj: *Obj,
 
     pub fn init(val: anytype) Self {
         const T = @TypeOf(val);
         return switch (@typeInfo(T)) {
-            .Float, .Int, .ComptimeFloat, .ComptimeInt => .{ .number = val },
-            .Bool => .{ .@"bool" = val },
             .Void => .{ .nil = {} },
+            .Bool => .{ .@"bool" = val },
+            .Float, .Int, .ComptimeFloat, .ComptimeInt => .{ .number = val },
+            .Pointer => .{ .obj = val },
             else => @compileError("invalid value type: " ++ @typeName(T)),
         };
     }
@@ -52,9 +54,10 @@ pub const Value = union(ValueType) {
     pub fn set(self: *Self, val: anytype) void {
         const T = @TypeOf(val);
         switch (@typeInfo(T)) {
-            .Float, .Int, .ComptimeFloat, .ComptimeInt => self.number = val,
-            .Bool => self.@"bool" = val,
             .Void => self.nil = {},
+            .Bool => self.@"bool" = val,
+            .Float, .Int, .ComptimeFloat, .ComptimeInt => self.number = val,
+            .Pointer => self.obj = val,
             else => @compileError("invalid value type: " ++ @typeName(T)),
         }
     }
@@ -63,20 +66,30 @@ pub const Value = union(ValueType) {
         return @as(ValueType, self);
     }
 
+    pub fn asBool(self: Self) bool {
+        return self.@"bool";
+    }
+
     pub fn asNumber(self: Self) f64 {
         return self.number;
     }
 
-    pub fn asBool(self: Self) bool {
-        return self.@"bool";
+    pub fn asObj(self: Self) *Obj {
+        return self.obj;
+    }
+
+    pub fn isObjType(self: Self, obj_type: ObjType) bool {
+        return self.type() == .obj and self.asObj().@"type" == obj_type;
     }
 
     pub fn isEqual(self: Self, other: Self) bool {
         if (self.type() != other.type()) return false;
         return switch (self.type()) {
-            .number => self.number == other.number,
-            .@"bool" => self.bool == other.bool,
             .nil => true,
+            .@"bool" => self.bool == other.bool,
+            .number => self.number == other.number,
+            // TODO: Support additional object types when they are added.
+            .obj => std.mem.eql(u8, self.obj.asString().bytes(), other.obj.asString().bytes()),
         };
     }
 
@@ -87,44 +100,17 @@ pub const Value = union(ValueType) {
             (self.type() == ValueType.number and self.number == 0);
     }
 
-    // TOOD: Should this take pointers to `self` and `other`, updating `self` in place?
-    // Switch is compiled differently for each case resulting in the removal of runtime opcode
-    // check.
-    pub inline fn binOp(self: Self, comptime op: OpCode, other: Self) Self {
-        return Value.init(switch (op) {
-            .add => self.number + other.number,
-            .sub => self.number - other.number,
-            .mul => self.number * other.number,
-            .div => self.number / other.number,
-            .gt => self.number > other.number,
-            .ge => self.number >= other.number,
-            .lt => self.number < other.number,
-            .le => self.number <= other.number,
-            .eq => self.isEqual(other),
-            .neq => !self.isEqual(other),
-            else => @compileError("invalid binary operator: " ++ @tagName(op)),
-        });
-    }
-
-    // pub inline fn binOp(self: *Self, comptime op: OpCode, other: Self) void {
-    //     switch (op) {
-    //         .add => self.number += other.number,
-    //         .sub => self.number -= other.number,
-    //         .mul => self.number *= other.number,
-    //         .div => self.number /= other.number,
-    //         else => @compileError("invalid operator: " ++ @tagName(op)),
-    //     }
-    // }
-
     pub fn format(
         self: Self,
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
-        _ = fmt;
-        _ = options;
         switch (self) {
+            .nil => try writer.writeAll("nil"),
+            .@"bool" => |val| {
+                try std.fmt.formatType(val, fmt, options, writer, std.fmt.default_max_depth);
+            },
             .number => |val| {
                 try std.fmt.formatType(
                     val,
@@ -134,16 +120,16 @@ pub const Value = union(ValueType) {
                     std.fmt.default_max_depth,
                 );
             },
-            .@"bool" => |val| {
-                try std.fmt.formatType(
-                    val,
-                    fmt,
-                    options,
-                    writer,
-                    std.fmt.default_max_depth,
-                );
+            .obj => |val| {
+                try std.fmt.formatType(val, fmt, options, writer, std.fmt.default_max_depth);
             },
-            .nil => try writer.print("nil", .{}),
+        }
+    }
+
+    pub fn testingExpectEqual(self: Self, other: Self) !void {
+        if (!self.isEqual(other)) {
+            std.debug.print("expected `{}`, found `{}`\n", .{ self, other });
+            return error.testingExpectEqual;
         }
     }
 };
