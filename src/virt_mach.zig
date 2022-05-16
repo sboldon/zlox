@@ -32,7 +32,7 @@ pub const VirtMach = struct {
     const stack_size = 64;
 
     // gpa: Allocator,
-    context: *Context,
+    ctx: *Context,
 
     // objs: std.SinglyLinkedList
     stack: [stack_size]Value = [_]Value{Value.init(0)} ** stack_size,
@@ -41,7 +41,7 @@ pub const VirtMach = struct {
     // ip: [*]u8 = undefined,
 
     pub fn init(ctx: *Context) Self {
-        return .{ .context = ctx };
+        return .{ .ctx = ctx };
     }
 
     /// This must be called before the first call to `interpret`.
@@ -127,11 +127,13 @@ pub const VirtMach = struct {
             .add => if (lhs.type() == .number and rhs.type() == .number)
                 Value.init(lhs.number + rhs.number)
             else if (lhs.isObjType(.string) and rhs.isObjType(.string)) blk: {
-                const string_obj =
-                    try StringObj.concat(self.context.gpa, lhs.obj.asString(), rhs.obj.asString());
-                const obj = string_obj.asObj();
-                self.context.trackObj(obj);
-                break :blk Value.init(obj);
+                // const string_obj =
+                //     try StringObj.concat(self.context.gpa, lhs.obj.asString(), rhs.obj.asString());
+                // const obj = string_obj.asObj();
+                // self.context.trackObj(obj);
+                // break :blk Value.init(obj);
+                const string_obj = try self.ctx.concatStrings(lhs.obj.asString(), rhs.obj.asString());
+                break :blk Value.init(string_obj.asObj());
             } else TypeError.BinOp,
             .sub => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number - rhs.number) else TypeError.BinOp,
             .mul => if (lhs.type() == .number and rhs.type() == .number) Value.init(lhs.number * rhs.number) else TypeError.BinOp,
@@ -206,7 +208,7 @@ pub const VirtMach = struct {
         args: anytype,
     ) InterpretError {
         const Color = std.debug.TTY.Color;
-        try writeAllColor(self.context.tty_config, Color.Red, Color.Bold, "error: ");
+        try writeAllColor(self.ctx.tty_config, Color.Red, Color.Bold, "error: ");
         const writer = std.io.getStdErr().writer();
         switch (err) {
             TypeError.UnOp => try writer.print(

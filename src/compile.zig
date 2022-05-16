@@ -59,7 +59,7 @@ const Parser = struct {
     const max_errors = 10;
 
     gpa: Allocator,
-    context: *Context,
+    ctx: *Context,
     module: *Module,
     current_chunk: *bytecode.Chunk,
 
@@ -151,7 +151,7 @@ const Parser = struct {
     ) !Self {
         return Self{
             .gpa = gpa,
-            .context = context,
+            .ctx = context,
             .module = module,
             .current_chunk = try module.newChunk(),
             .scanner = scanner,
@@ -249,12 +249,16 @@ const Parser = struct {
 
     fn string(self: *Self) !void {
         const prev_tok_chars = self.prev_tok.loc.contents(self.scanner.source);
+        // const str_obj =
+        //     // Exclude surrounding quotes.
+        //     try StringObj.create(self.gpa, prev_tok_chars[1 .. prev_tok_chars.len - 1]);
+        // const obj = str_obj.asObj();
+        // self.ctx.trackObj(obj);
+        // try self.emit(Value.init(obj));
         const str_obj =
             // Exclude surrounding quotes.
-            try StringObj.create(self.gpa, prev_tok_chars[1 .. prev_tok_chars.len - 1]);
-        const obj = str_obj.asObj();
-        self.context.trackObj(obj);
-        try self.emit(Value.init(obj));
+            try self.ctx.createString(prev_tok_chars[1 .. prev_tok_chars.len - 1]);
+        try self.emit(Value.init(str_obj.asObj()));
     }
 
     fn number(self: *Self) error{OutOfMemory}!void {
@@ -325,7 +329,7 @@ const Parser = struct {
         self.panic_mode = true;
 
         const Color = std.debug.TTY.Color;
-        try writeAllColor(self.context.tty_config, Color.Red, Color.Bold, "error: ");
+        try writeAllColor(self.ctx.tty_config, Color.Red, Color.Bold, "error: ");
         const writer = std.io.getStdErr().writer();
         switch (err) {
             .unknown_character => {
@@ -443,14 +447,14 @@ const Parser = struct {
         var context = try Context.init(testing.allocator, .{ .main_file_path = null });
         defer context.deinit();
         var module = &context.main_module;
-        var parser = try Parser.init(
+        var self = try init(
             testing.allocator,
             &context,
             module,
             Scanner{ .source = source_code },
         );
-        parser.next();
-        try parser.expression();
+        self.next();
+        try self.expression();
         try expected_chunk.testingExpectEqual(&module.bytecode.elems[0]);
     }
 };

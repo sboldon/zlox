@@ -154,10 +154,7 @@ pub const Chunk = struct {
         return switch (@typeInfo(T)) {
             .Int => self.line_info.getLineFromOffset(ref),
             .Pointer => self.line_info.getLineFromOffset(self.offsetOfAddr(ref)),
-            else => @compileError(
-                "invalid type for `ref` parameter of `Chunk.lineOfInstr` function: " ++
-                    @typeName(T),
-            ),
+            else => @compileError("invalid type of `ref` parameter: " ++ @typeName(T)),
         };
     }
 

@@ -95,6 +95,7 @@ test "suite" {
     _ = @import("bytecode.zig");
     _ = @import("compile.zig");
     _ = @import("dynamic_array.zig");
+    _ = @import("interning.zig");
     _ = @import("object.zig");
     _ = @import("scanner.zig");
     _ = @import("virt_mach.zig");

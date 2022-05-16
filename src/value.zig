@@ -47,7 +47,7 @@ pub const Value = union(ValueType) {
             .Bool => .{ .@"bool" = val },
             .Float, .Int, .ComptimeFloat, .ComptimeInt => .{ .number = val },
             .Pointer => .{ .obj = val },
-            else => @compileError("invalid value type: " ++ @typeName(T)),
+            else => @compileError("invalid type of `val` parameter: " ++ @typeName(T)),
         };
     }
 
@@ -58,7 +58,7 @@ pub const Value = union(ValueType) {
             .Bool => self.@"bool" = val,
             .Float, .Int, .ComptimeFloat, .ComptimeInt => self.number = val,
             .Pointer => self.obj = val,
-            else => @compileError("invalid value type: " ++ @typeName(T)),
+            else => @compileError("invalid type of `val` parameter: " ++ @typeName(T)),
         }
     }
 
@@ -88,8 +88,9 @@ pub const Value = union(ValueType) {
             .nil => true,
             .@"bool" => self.bool == other.bool,
             .number => self.number == other.number,
-            // TODO: Support additional object types when they are added.
-            .obj => std.mem.eql(u8, self.obj.asString().bytes(), other.obj.asString().bytes()),
+            // Strings can be compared via pointer equality because of interning. If two string
+            // objects have the same address, the have the same bytes.
+            .obj => self.obj == other.obj,
         };
     }
 
@@ -127,9 +128,19 @@ pub const Value = union(ValueType) {
     }
 
     pub fn testingExpectEqual(self: Self, other: Self) !void {
-        if (!self.isEqual(other)) {
+        if (self.type() != .obj) {
+            if (!self.isEqual(other)) {
+                std.debug.print("expected `{}`, found `{}`\n", .{ self, other });
+                return error.testingExpectEqual;
+            }
+        } else if (other.type() != .obj) {
             std.debug.print("expected `{}`, found `{}`\n", .{ self, other });
             return error.testingExpectEqual;
+        } else {
+            self.obj.testingExpectEqual(other.obj) catch |err| {
+                std.debug.print("expected `{}`, found `{}`\n", .{ self, other });
+                return err;
+            };
         }
     }
 };
