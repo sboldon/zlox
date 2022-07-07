@@ -1,9 +1,11 @@
 const std = @import("std");
 
+const Module = @import("Module.zig");
+
 const Self = @This();
 
 @"type": @"Type",
-loc: Span,
+loc: Module.Span,
 
 pub const @"Type" = enum(u8) {
     plus,
@@ -108,8 +110,8 @@ pub const @"Type" = enum(u8) {
         };
     }
 
-    pub fn toString(@"type": @"Type") []const u8 {
-        return @"type".lexeme() orelse switch (@"type") {
+    pub fn category(@"type": @"Type") []const u8 {
+        return switch (@"type") {
             .identifier => "an identifier",
             .number_literal => "a number",
             .string_literal => "a string",
@@ -117,20 +119,6 @@ pub const @"Type" = enum(u8) {
             .invalid => "an invalid token",
             else => unreachable,
         };
-    }
-};
-
-/// The offset bounds [lo, hi) of a contiguous sequence of bytes in a source file.
-pub const Span = struct {
-    lo: usize,
-    hi: usize,
-
-    pub fn ofPos(pos: usize) Span {
-        return .{ .lo = pos, .hi = pos + 1 };
-    }
-
-    pub fn contents(self: Span, source: [:0]const u8) []const u8 {
-        return source[self.lo..self.hi];
     }
 };
 

@@ -79,8 +79,8 @@ pub const StringObj = extern struct {
     };
 
     obj: Obj,
-    hash: u64,
     owner: bool,
+    hash: u64,
     len: usize,
     contents: String,
 
@@ -111,12 +111,10 @@ pub const StringObj = extern struct {
         };
     }
 
-    // TODO: Determine the necessity of this function. Can all use cases be handled by `create` and
-    // `concat`?
-    /// Create a `StringObj` by copying the bytes of `slice[0..]`.
-    pub fn createOwned(gpa: Allocator, slice: []const u8) !*Self {
+    /// Create a `StringObj` by copying the bytes of `string.slice[0..]`.
+    pub fn createOwned(gpa: Allocator, string: HashedString) !*Self {
         // Ensure that at least `@sizeOf(Self)` bytes are allocated.
-        const flexible_array_len = std.math.max(slice.len, @bitSizeOf([*]const u8));
+        const flexible_array_len = std.math.max(string.slice.len, @bitSizeOf([*]const u8));
         var self = @ptrCast(
             *Self,
             try gpa.alignedAlloc(
@@ -126,10 +124,10 @@ pub const StringObj = extern struct {
             ),
         );
         self.obj = Obj.init(.string);
-        self.hash = std.hash_map.hashString(slice);
         self.owner = true;
-        self.len = slice.len;
-        std.mem.copy(u8, @as([*]u8, &self.contents.owned)[0..self.len], slice);
+        self.hash = string.hash;
+        self.len = string.slice.len;
+        std.mem.copy(u8, @as([*]u8, &self.contents.owned)[0..self.len], string.slice);
         return self;
     }
 
@@ -148,9 +146,9 @@ pub const StringObj = extern struct {
         self.obj = Obj.init(.string);
         self.owner = true;
         self.len = str_len;
-        const char_array = @as([*]u8, &self.contents.owned);
-        std.mem.copy(u8, char_array[0..self.len], lhs.bytes());
-        std.mem.copy(u8, char_array[lhs.len..self.len], rhs.bytes());
+        const array = @as([*]u8, &self.contents.owned);
+        std.mem.copy(u8, array[0..self.len], lhs.bytes());
+        std.mem.copy(u8, array[lhs.len..self.len], rhs.bytes());
         self.hash = std.hash_map.hashString(self.bytes());
         return self;
     }
@@ -182,14 +180,17 @@ pub const StringObj = extern struct {
     }
 
     pub fn testingExpectEqual(self: *const Self, other: *const Self) !void {
-        try testing.expectEqualStrings(self.bytes(), other.bytes());
+        testing.expectEqualStrings(self.bytes(), other.bytes()) catch {
+            std.debug.print("expected `{}`, found `{}`\n", .{ self, other });
+            return error.testingExpectEqual;
+        };
     }
 
     test "creation" {
         const s1 = StringObj.init("hello world");
         try testing.expectEqualStrings("hello world", s1.bytes());
 
-        const s2 = try StringObj.createOwned(testing.allocator, "lorem ipsum");
+        const s2 = try StringObj.createOwned(testing.allocator, HashedString.init("lorem ipsum"));
         defer testing.allocator.destroy(s2);
         try testing.expectEqualStrings("lorem ipsum", s2.bytes());
 

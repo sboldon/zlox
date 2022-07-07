@@ -1,24 +1,27 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const build_options = @import("build_options");
+const DynamicArray = @import("dynamic_array.zig").DynamicArray;
 const Context = @import("Context.zig");
-const Module = @import("module.zig").Module;
+const Module = @import("Module.zig");
 const Scanner = @import("scanner.zig").Scanner;
 const Token = @import("Token.zig");
 const bytecode = @import("bytecode.zig");
 const Value = @import("value.zig").Value;
-const object = @import("object.zig");
-const Obj = object.Obj;
-const StringObj = object.StringObj;
+const Obj = @import("object.zig").Obj;
+const StringObj = @import("object.zig").StringObj;
 
 const writeAllColor = @import("main.zig").writeAllColor;
 
+// Not using an error type because the parser attempts to recover from compilation errors.
 pub const Error = enum(u8) {
     unknown_character,
     unexpected_token,
     empty_expression,
+    invalid_assignment_target,
 };
 
 /// Maintains the state of a REPL sesssion across multiple invocations of `compileSource`.
@@ -70,6 +73,14 @@ const Parser = struct {
     panic_mode: bool = false,
     reported_errors: u8 = 0,
 
+    /// True if the expression currently being parsed has a minimum precedence level of `none` or
+    /// `assignment`. If an equal sign is encountered when `assignment_allowed` is false, the
+    /// expression is not an lval and a compilation error is emitted.
+    assignment_allowed: bool = true,
+
+    /// Optional struct member for testing compilation erorr handling.
+    errors: if (builtin.is_test) DynamicArray(Error) else void,
+
     /// Operator precedence from lowest to highest.
     const Precedence = enum(u8) {
         none,
@@ -104,44 +115,47 @@ const Parser = struct {
         prefixAction: ?fn (*Self) error{OutOfMemory}!void,
         infixAction: ?fn (*Self) error{OutOfMemory}!void,
         prec: Precedence,
+
+        const rules = std.enums.directEnumArrayDefault(
+            Token.Type,
+            Rule,
+            .{ .prefixAction = null, .infixAction = null, .prec = .none }, // Default rule.
+            0,
+            .{
+                .keyword_nil = .{ .prefixAction = literal, .infixAction = null, .prec = .none },
+                .keyword_true = .{ .prefixAction = literal, .infixAction = null, .prec = .none },
+                .keyword_false = .{ .prefixAction = literal, .infixAction = null, .prec = .none },
+                .identifier = .{ .prefixAction = identifier, .infixAction = null, .prec = .none },
+                .number_literal = .{ .prefixAction = number, .infixAction = null, .prec = .none },
+                .string_literal = .{ .prefixAction = string, .infixAction = null, .prec = .none },
+                .left_paren = .{ .prefixAction = grouping, .infixAction = null, .prec = .none },
+
+                // `.equal` does not have a rule because determining whether a value is being
+                // obtained from an lval or a value is being assigned to an lval must be done before
+                // `.equal` is the current token.
+
+                .equal_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .equality },
+                .bang_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .equality },
+
+                .left_angle_brack = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
+                .right_angle_brack = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
+                .left_angle_brack_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
+                .right_angle_brack_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
+
+                .plus = .{ .prefixAction = null, .infixAction = binary, .prec = .term },
+                .dash = .{ .prefixAction = unary, .infixAction = binary, .prec = .term },
+
+                .star = .{ .prefixAction = null, .infixAction = binary, .prec = .factor },
+                .fwd_slash = .{ .prefixAction = null, .infixAction = binary, .prec = .factor },
+
+                .bang = .{ .prefixAction = unary, .infixAction = null, .prec = .unary },
+            },
+        );
+
+        inline fn get(tok_ty: Token.Type) *const Rule {
+            return &rules[@enumToInt(tok_ty)];
+        }
     };
-
-    const rules = std.enums.directEnumArrayDefault(
-        Token.Type,
-        Rule,
-        .{ .prefixAction = null, .infixAction = null, .prec = .none }, // Default rule.
-        0,
-        .{
-            .keyword_nil = .{ .prefixAction = literal, .infixAction = null, .prec = .none },
-            .keyword_true = .{ .prefixAction = literal, .infixAction = null, .prec = .none },
-            .keyword_false = .{ .prefixAction = literal, .infixAction = null, .prec = .none },
-            .number_literal = .{ .prefixAction = number, .infixAction = null, .prec = .none },
-            .string_literal = .{ .prefixAction = string, .infixAction = null, .prec = .none },
-            .left_paren = .{ .prefixAction = grouping, .infixAction = null, .prec = .none },
-
-            //TODO .equal = .{ },
-
-            .equal_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .equality },
-            .bang_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .equality },
-
-            .left_angle_brack = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
-            .right_angle_brack = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
-            .left_angle_brack_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
-            .right_angle_brack_equal = .{ .prefixAction = null, .infixAction = binary, .prec = .inequality },
-
-            .plus = .{ .prefixAction = null, .infixAction = binary, .prec = .term },
-            .dash = .{ .prefixAction = unary, .infixAction = binary, .prec = .term },
-
-            .star = .{ .prefixAction = null, .infixAction = binary, .prec = .factor },
-            .fwd_slash = .{ .prefixAction = null, .infixAction = binary, .prec = .factor },
-
-            .bang = .{ .prefixAction = unary, .infixAction = null, .prec = .unary },
-        },
-    );
-
-    inline fn parseRule(tok_ty: Token.Type) *const Rule {
-        return &rules[@enumToInt(tok_ty)];
-    }
 
     fn init(
         gpa: Allocator,
@@ -155,6 +169,8 @@ const Parser = struct {
             .module = module,
             .current_chunk = try module.newChunk(),
             .scanner = scanner,
+            // Freeing happens in test function.
+            .errors = if (builtin.is_test) DynamicArray(Error).init(testing.allocator) else {},
         };
     }
 
@@ -167,13 +183,54 @@ const Parser = struct {
 
     fn compileModule(self: *Self) !void {
         self.next();
-        try self.expression();
-        self.expect(.eof);
+        while (self.tok.type != .eof) {
+            try self.declaration();
+        }
         try self.emit(.ret);
         if (comptime build_options.log_bytecode) {
             if (!self.hadError()) {
-                try self.current_chunk.disassemble(std.io.getStdErr().writer(), "code");
+                try self.current_chunk.disassemble(std.io.getStdErr().writer(), "current chunk");
             }
+        }
+    }
+
+    fn declaration(self: *Self) !void {
+        switch (self.tok.type) {
+            .keyword_var => {
+                self.next();
+                try self.varDecl();
+            },
+            else => try self.statement(),
+        }
+        if (self.panic_mode) self.synchronize();
+        std.log.debug("`Parser.declaration`: `self.tok.type` = {s}", .{@tagName(self.tok.type)});
+    }
+
+    fn varDecl(self: *Self) !void {
+        const data_idx = try self.expectIdent();
+        if (self.match(.equal)) {
+            try self.expression();
+        } else {
+            // The declaration `var a` is equivalent to `var a = nil`.
+            try self.emit(.nil);
+        }
+        self.expect(.semicolon);
+        try self.emitVariableLenInstr(.def_global, .def_global_long, data_idx);
+    }
+
+    fn statement(self: *Self) !void {
+        switch (self.tok.type) {
+            .keyword_print => {
+                self.next();
+                try self.expression();
+                self.expect(.semicolon);
+                try self.emit(.print);
+            },
+            else => {
+                try self.expression();
+                self.expect(.semicolon);
+                try self.emit(.pop);
+            },
         }
     }
 
@@ -183,29 +240,35 @@ const Parser = struct {
 
     fn parsePrecedence(self: *Self, min_prec: Precedence) !void {
         self.next();
-        const lhs_rule = parseRule(self.prev_tok.type);
-        std.log.debug("`parsePrecedence`: `prev_tok.type` = {s}\n", .{@tagName(self.prev_tok.type)});
+        const lhs_rule = Rule.get(self.prev_tok.type);
+        std.log.debug("`Parser.parsePrecedence`: `prev_tok.type` = {s}", .{@tagName(self.prev_tok.type)});
         if (lhs_rule.prefixAction) |prefixAction| {
+            self.assignment_allowed = @enumToInt(Precedence.assignment) >= @enumToInt(min_prec);
             try prefixAction(self);
-            while (@enumToInt(parseRule(self.tok.type).prec) >= @enumToInt(min_prec)) {
+            while (@enumToInt(Rule.get(self.tok.type).prec) >= @enumToInt(min_prec)) {
                 std.log.debug(
-                    "`parsePrecedence`: `self.tok.type` precedence = {}, `min_prec` = {}\n",
-                    .{ @enumToInt(parseRule(self.tok.type).prec), @enumToInt(min_prec) },
+                    "`Parser.parsePrecedence`: `self.tok.type` precedence = {s}, `min_prec` = {s}",
+                    .{ @tagName(Rule.get(self.tok.type).prec), @tagName(min_prec) },
                 );
                 self.next();
-                const rhs_rule = parseRule(self.prev_tok.type);
+                const rhs_rule = Rule.get(self.prev_tok.type);
                 try rhs_rule.infixAction.?(self);
             }
+            if (self.match(.equal) and !self.assignment_allowed) {
+                // Encountering '=' when `min_prec` is greater than `.assignment` means that we're
+                // inside a binary/unary expression.
+                self.errorAtCurrent(Error.invalid_assignment_target, .{});
+            }
         } else {
-            self.errorAtPrev(.empty_expression);
+            self.errorAtPrev(.empty_expression, .{});
         }
     }
 
     fn binary(self: *Self) error{OutOfMemory}!void {
         // Assumes that the lhs has already been consumed.
         const op = self.prev_tok.type;
-        std.log.debug("`binary`: `op` = {s}\n", .{@tagName(op)});
-        const rule = parseRule(op);
+        std.log.debug("`Parser.binary`: `op` = {s}", .{@tagName(op)});
+        const rule = Rule.get(op);
         // Precedence is incremented to enforce left-associativity.
         try self.parsePrecedence(rule.prec.nextLevel());
 
@@ -234,7 +297,7 @@ const Parser = struct {
     fn unary(self: *Self) !void {
         // Assumes that the operator is the previous token.
         const op = self.prev_tok.type;
-        std.log.debug("`unary`: `op` = {s}\n", .{@tagName(op)});
+        std.log.debug("`Parser.unary`: `op` = {s}", .{@tagName(op)});
 
         // Ensure any additional unary operators are applied first.
         try self.parsePrecedence(.unary);
@@ -245,6 +308,26 @@ const Parser = struct {
             else => unreachable,
         };
         try self.emit(opcode);
+    }
+
+    fn identifier(self: *Self) !void {
+        const name = self.prev_tok.loc.contents(self.scanner.source);
+        const str_obj = try self.ctx.createString(name);
+        const data_idx = try self.current_chunk.addConstant(Value.init(str_obj));
+        // if (self.match(.equal)) {
+        //     if (!self.assignment_allowed) {
+        //         self.errorAtCurrent(Error.invalid_assignment_target, .{});
+        //     } else {
+        //         try self.expression();
+        //         try self.emitVariableLenInstr(.set_global, .set_global_long, data_idx);
+        //     }
+        // } else {
+        if (self.match(.equal) and self.assignment_allowed) {
+            try self.expression();
+            try self.emitVariableLenInstr(.set_global, .set_global_long, data_idx);
+        } else {
+            try self.emitVariableLenInstr(.get_global, .get_global_long, data_idx);
+        }
     }
 
     fn string(self: *Self) !void {
@@ -258,7 +341,7 @@ const Parser = struct {
         const str_obj =
             // Exclude surrounding quotes.
             try self.ctx.createString(prev_tok_chars[1 .. prev_tok_chars.len - 1]);
-        try self.emit(Value.init(str_obj.asObj()));
+        try self.emit(Value.init(str_obj));
     }
 
     fn number(self: *Self) error{OutOfMemory}!void {
@@ -267,7 +350,7 @@ const Parser = struct {
             f64,
             self.prev_tok.loc.contents(self.scanner.source),
         ) catch unreachable;
-        std.log.debug("`number`: `num` = {}\n", .{num});
+        std.log.debug("`Parser.number`: `num` = {}", .{num});
         try self.emit(Value.init(num));
     }
 
@@ -282,7 +365,7 @@ const Parser = struct {
     }
 
     /// Expecting `item` to be a `Value`, `bytecode.OpCode`, or `u8`.
-    fn emit(self: *Self, item: anytype) !void {
+    inline fn emit(self: *Self, item: anytype) !void {
         // TODO: Currently cannot give line numbers to bytecode chunk because of the location
         // information associated with each token: an offset into a source file instead of
         // line/col. This allows line & col to be calculated on demand and provides easy access to
@@ -294,15 +377,26 @@ const Parser = struct {
         try self.current_chunk.write(item, 1);
     }
 
+    inline fn emitVariableLenInstr(
+        self: *Self,
+        u8_operand_op: bytecode.OpCode,
+        u16_operand_op: bytecode.OpCode,
+        operand: u16,
+    ) !void {
+        try self.current_chunk.writeVariableLenInstr(u8_operand_op, u16_operand_op, operand, 1);
+    }
+
     fn next(self: *Self) void {
         // The first time `next` is called, both `prev_tok` and `tok` are uninitialized, but
         // `prev_tok` is not accessed until after `next` has been called an additional time.
         self.prev_tok = self.tok;
-        self.tok = self.scanner.next();
+
+        // Consume invalid tokens.
         while (true) {
-            // Skip invalid tokens.
+            self.tok = self.scanner.next();
+            // std.debug.print("`next`: `self.tok` = {s}\n", .{@tagName(self.tok.type)});
             if (self.tok.type != Token.Type.invalid) return;
-            self.errorAtCurrent(Error.unknown_character);
+            self.errorAtCurrent(Error.unknown_character, .{});
         }
     }
 
@@ -310,23 +404,84 @@ const Parser = struct {
         if (self.tok.type == expected) {
             self.next();
         } else {
-            self.errorAtCurrent(Error.unexpected_token);
+            self.errorAtCurrent(Error.unexpected_token, .{expected});
         }
     }
 
-    fn hadError(self: Self) bool {
+    inline fn match(self: *Self, token_type: Token.Type) bool {
+        if (self.tok.type == token_type) {
+            self.next();
+            return true;
+        }
+        return false;
+    }
+
+    /// Returns the index that the name of the identifier is stored at in the current chunk's data
+    /// section.
+    fn expectIdent(self: *Self) !u16 {
+        const name = if (self.tok.type == .identifier) blk: {
+            const lexeme = self.tok.loc.contents(self.scanner.source);
+            self.next();
+            break :blk lexeme;
+        } else blk: {
+            self.errorAtCurrent(Error.unexpected_token, .{Token.Type.identifier});
+            // Works as a placeholder name because legal identifiers cannot start with a number.
+            break :blk "0";
+        };
+        const str_obj = try self.ctx.createString(name);
+        return self.current_chunk.addConstant(Value.init(str_obj));
+    }
+
+    /// Attempt to recover from a syntax error by consuming tokens until the start of the next
+    /// statement.
+    fn synchronize(self: *Self) void {
+        self.panic_mode = false;
+        if (self.prev_tok.type == .semicolon) return;
+        while (true) : (self.next()) {
+            switch (self.tok.type) {
+                .keyword_class,
+                .keyword_fun,
+                .keyword_var,
+                .keyword_for,
+                .keyword_while,
+                .keyword_if,
+                .keyword_print,
+                .eof,
+                => {
+                    std.log.debug("`Parser.synchronize`: found {s}", .{@tagName(self.tok.type)});
+                    return;
+                },
+                else => std.log.debug("`Parser.synchronize`: consuming {s}", .{@tagName(self.tok.type)}),
+            }
+        }
+    }
+
+    inline fn hadError(self: Self) bool {
         return self.reported_errors > 0;
+    }
+
+    inline fn errorAtCurrent(self: *Self, comptime err: Error, args: anytype) void {
+        self.errorAt(err, self.tok, args) catch return;
+    }
+
+    inline fn errorAtPrev(self: *Self, comptime err: Error, args: anytype) void {
+        self.errorAt(err, self.prev_tok, args) catch return;
     }
 
     fn errorAt(
         self: *Self,
         comptime err: Error,
         tok: Token,
+        args: anytype,
     ) !void {
         if (self.panic_mode or self.reported_errors > max_errors) {
             return;
         }
         self.panic_mode = true;
+
+        if (comptime builtin.is_test) {
+            try self.errors.append(err);
+        }
 
         const Color = std.debug.TTY.Color;
         try writeAllColor(self.ctx.tty_config, Color.Red, Color.Bold, "error: ");
@@ -334,70 +489,69 @@ const Parser = struct {
         switch (err) {
             .unknown_character => {
                 const ch = self.scanner.source[tok.loc.lo];
-                try if (std.ascii.isPrint(ch))
-                    writer.print("invalid character in current context: '{c}'\n", .{ch})
+                if (ch == '"')
+                    try writer.writeAll("unterminated string literal\n")
+                else if (std.ascii.isPrint(ch))
+                    try writer.print("invalid character in current context: '{c}'\n", .{ch})
                 else
-                    writer.print("unknown byte: '{x}'\n", .{ch});
+                    try writer.print("unknown byte: '{x}'\n", .{ch});
             },
-            .unexpected_token => try writer.print("expected {s}\n", .{tok.type.toString()}),
+            .unexpected_token => {
+                const expected_tok_type = args[0];
+                if (expected_tok_type.lexeme()) |lexeme|
+                    try writer.print("expected '{s}'\n", .{lexeme})
+                else
+                    try writer.print("expected {s}\n", .{expected_tok_type.category()});
+            },
             .empty_expression => try writer.writeAll("expected an expression\n"),
+            .invalid_assignment_target => try writer.writeAll("left-hand side is not an assignable value\n"),
         }
         // TODO: Print location
         self.reported_errors += 1;
     }
 
-    fn errorAtCurrent(self: *Self, comptime err: Error) void {
-        errorAt(self, err, self.tok) catch return;
-    }
-
-    fn errorAtPrev(self: *Self, comptime err: Error) void {
-        errorAt(self, err, self.prev_tok) catch return;
-    }
-
     test "literals" {
-        try testCase("nil", comptime .{.nil});
-        try testCase("true", comptime .{.@"true"});
-        try testCase("false", comptime .{.@"false"});
-        try testCase("0", comptime .{Value.init(0)});
-        try testCase("\"hello world\"", comptime blk: {
+        try TestCase.expr("nil", .{.nil});
+        try TestCase.expr("true", .{.@"true"});
+        try TestCase.expr("false", .{.@"false"});
+        try TestCase.expr("0", .{Value.init(0)});
+        try TestCase.expr("\"hello world\"", blk: {
             var str_obj = StringObj.init("hello world");
-            break :blk .{Value.init((&str_obj).asObj())};
+            break :blk .{Value.init(&str_obj)};
         });
     }
 
     test "operators" {
-
-        // TODO: assignment
         // TODO: or
         // TODO: and
-        try testCase("1 == 2", comptime .{ Value.init(1), Value.init(2), .eq });
-        try testCase("1 != 2", comptime .{ Value.init(1), Value.init(2), .neq });
-        try testCase("1 < 2", comptime .{ Value.init(1), Value.init(2), .lt });
-        try testCase("1 > 2", comptime .{ Value.init(1), Value.init(2), .gt });
-        try testCase("1 <= 2", comptime .{ Value.init(1), Value.init(2), .le });
-        try testCase("1 >= 2", comptime .{ Value.init(1), Value.init(2), .ge });
-        try testCase("1 + 2", comptime .{ Value.init(1), Value.init(2), .add });
-        try testCase("1 - 2", comptime .{ Value.init(1), Value.init(2), .sub });
-        try testCase("1 * 2", comptime .{ Value.init(1), Value.init(2), .mul });
-        try testCase("1 / 2", comptime .{ Value.init(1), Value.init(2), .div });
-        try testCase("-1", comptime .{ Value.init(1), .neg });
-        try testCase("!1", comptime .{ Value.init(1), .not });
+        try TestCase.expr("1 == 2", .{ Value.init(1), Value.init(2), .eq });
+        try TestCase.expr("1 != 2", .{ Value.init(1), Value.init(2), .neq });
+        try TestCase.expr("1 < 2", .{ Value.init(1), Value.init(2), .lt });
+        try TestCase.expr("1 > 2", .{ Value.init(1), Value.init(2), .gt });
+        try TestCase.expr("1 <= 2", .{ Value.init(1), Value.init(2), .le });
+        try TestCase.expr("1 >= 2", .{ Value.init(1), Value.init(2), .ge });
+        try TestCase.expr("1 + 2", .{ Value.init(1), Value.init(2), .add });
+        try TestCase.expr("1 - 2", .{ Value.init(1), Value.init(2), .sub });
+        try TestCase.expr("1 * 2", .{ Value.init(1), Value.init(2), .mul });
+        try TestCase.expr("1 / 2", .{ Value.init(1), Value.init(2), .div });
+        try TestCase.expr("-1", .{ Value.init(1), .neg });
+        try TestCase.expr("!1", .{ Value.init(1), .not });
 
-        try testCase("1 - 2 + 3", comptime .{
+        try TestCase.expr("1 - 2 + 3", .{
             Value.init(1),
             Value.init(2),
             .sub,
             Value.init(3),
             .add,
         });
-        try testCase("1 - (2 + 3)", comptime .{
+        try TestCase.expr("1 - (2 + 3)", .{
             Value.init(1),
             Value.init(2),
             Value.init(3),
             .add,
             .sub,
         });
-        try testCase("1 + 2 * 3 - 4 < !5 == 6 > 7", comptime .{
+        try TestCase.expr("1 + 2 * 3 - 4 < !5 == 6 > 7", .{
             Value.init(1),
             Value.init(2),
             Value.init(3),
@@ -413,50 +567,90 @@ const Parser = struct {
             .gt,
             .eq,
         });
-        try testCase("-!-1", comptime .{
+        try TestCase.expr("-!-1", .{
             Value.init(1),
             .neg,
             .not,
             .neg,
         });
 
-        try testCase("\"first half\" + \"second half\"", comptime blk: {
+        try TestCase.expr("\"first half\" + \"second half\"", blk: {
             var s1 = StringObj.init("first half");
             var s2 = StringObj.init("second half");
-            break :blk .{
-                Value.init((&s1).asObj()),
-                Value.init((&s2).asObj()),
-                .add,
-            };
+            break :blk .{ Value.init(&s1), Value.init(&s2), .add };
         });
     }
 
-    fn testCase(source_code: [:0]const u8, expected_data: anytype) !void {
-        var expected_chunk = if (@TypeOf(expected_data) == bytecode.Chunk)
-            expected_data
-        else blk: {
-            // Expecting a comptime tuple of bytecode instructions and constants.
-            var expected_chunk = bytecode.Chunk.init(testing.allocator);
-            try expected_chunk.fill(expected_data);
-            break :blk expected_chunk;
-        };
-        defer expected_chunk.deinit();
-
-        // try expected_chunk.disassemble(std.io.getStdErr().writer(), "test");
-
-        var context = try Context.init(testing.allocator, .{ .main_file_path = null });
-        defer context.deinit();
-        var module = &context.main_module;
-        var self = try init(
-            testing.allocator,
-            &context,
-            module,
-            Scanner{ .source = source_code },
-        );
-        self.next();
-        try self.expression();
-        try expected_chunk.testingExpectEqual(&module.bytecode.elems[0]);
+    test "global vars" {
+        {
+            var state = try TestCase.init("var a;");
+            defer state.deinit();
+            try state.parser.compileModule();
+            var name = try state.ctx.createString("a");
+            _ = try state.expected_chunk.addConstant(Value.init(name));
+            try state.expectEqualChunks(.{ .nil, .def_global, 0, .ret });
+        }
+        {
+            var state = try TestCase.init("var a = \"hello world\";");
+            defer state.deinit();
+            try state.parser.compileModule();
+            var name = try state.ctx.createString("a");
+            var val = try state.ctx.createString("hello world");
+            _ = try state.expected_chunk.addConstant(Value.init(name));
+            try state.expectEqualChunks(.{ Value.init(val), .def_global, 0, .ret });
+        }
+        {
+            var state = try TestCase.init("!0 = 2 + 3;");
+            defer state.deinit();
+            try state.parser.compileModule();
+            try testing.expectEqualSlices(Error, &.{.invalid_assignment_target}, state.parser.errors.elems);
+        }
+        {
+            var state = try TestCase.init("1 == 2 = 2 + 3;");
+            defer state.deinit();
+            try state.parser.compileModule();
+            try testing.expectEqualSlices(Error, &.{.invalid_assignment_target}, state.parser.errors.elems);
+        }
     }
+
+    const TestCase = struct {
+        ctx: *Context,
+        parser: Parser,
+        expected_chunk: bytecode.Chunk,
+
+        fn init(source_code: [:0]const u8) !TestCase {
+            const ctx = try testing.allocator.create(Context);
+            ctx.* = try Context.init(testing.allocator, .{ .main_file_path = null });
+            var parser = try Parser.init(
+                testing.allocator,
+                ctx,
+                &ctx.main_module,
+                Scanner{ .source = source_code },
+            );
+            var expected_chunk = bytecode.Chunk.init(testing.allocator);
+            return TestCase{ .ctx = ctx, .parser = parser, .expected_chunk = expected_chunk };
+        }
+
+        fn deinit(state: *TestCase) void {
+            state.ctx.deinit();
+            testing.allocator.destroy(state.ctx);
+            state.parser.errors.deinit();
+            state.expected_chunk.deinit();
+        }
+
+        fn expectEqualChunks(state: *TestCase, expected_data: anytype) !void {
+            try state.expected_chunk.fill(expected_data);
+            try state.expected_chunk.testingExpectEqual(state.parser.current_chunk);
+        }
+
+        fn expr(source_code: [:0]const u8, expected_data: anytype) !void {
+            var state = try TestCase.init(source_code);
+            defer state.deinit();
+            state.parser.next();
+            try state.parser.expression();
+            try state.expectEqualChunks(expected_data);
+        }
+    };
 };
 
 test {

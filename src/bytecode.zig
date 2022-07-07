@@ -7,16 +7,33 @@ const value = @import("value.zig");
 const Value = value.Value;
 const ValueType = value.ValueType;
 
-// Underscore denotes an open enum meaning that @intToEnum on an int not in the enum can be matched against
-// with '_' in switch statements.
+// Multi-byte operands are written in little-endian byte order.
 pub const OpCode = enum(u8) {
     const Self = @This();
 
-    constant, // 2 byte instruction; opcode is followed by an index into the data section of a chunk.
-    ret,
+    /// Pushes a constant value onto the stack.
+    /// Args: The u8/u16 index that the constant is stored at.
+    constant,
+    constant_long,
+    /// Binds the value on the top of the stack to an identifier and then pops the stack.
+    /// Args: The u8/u16 index that the identifier is stored at.
+    def_global,
+    def_global_long,
+    /// Attempts to retrieve the value bound to an identifier. If successful, the value is pushed
+    /// onto the stack. If the identifier is undefined, a runtime error occurs.
+    /// Args: The u8/u16 index that the identifier is stored at.
+    get_global,
+    get_global_long,
+    /// Attempts to update the binding of an identifier to the value on the top of the stack. If the
+    /// identifier is undefined, a runtime error occurs.
+    /// Args: The u8/u16 index that the identifier is stored at.
+    set_global,
+    set_global_long,
+
     nil,
     @"true",
     @"false",
+
     add,
     sub,
     mul,
@@ -29,6 +46,10 @@ pub const OpCode = enum(u8) {
     neq,
     neg,
     not,
+
+    ret,
+    pop,
+    print,
     _,
 
     pub fn validOperandType(comptime self: Self, val: Value) bool {
@@ -52,7 +73,7 @@ pub const OpCode = enum(u8) {
             .le => "<=",
             .eq => "==",
             .neq => "!=",
-            else => @compileError("invalid opcode: " ++ @tagName(self)),
+            else => @compileError("opcode has no lexeme: " ++ @tagName(self)),
         };
     }
 };
@@ -62,83 +83,123 @@ pub const Chunk = struct {
     const Self = @This();
     code: DynamicArray(u8),
     data: DynamicArray(Value),
-    line_info: LineInfo,
+    instr_locs: LocationInfo,
 
     pub fn init(alloc: Allocator) Self {
         return .{
             .code = DynamicArray(u8).init(alloc),
             .data = DynamicArray(Value).init(alloc),
-            .line_info = LineInfo.init(alloc),
+            .instr_locs = LocationInfo.init(alloc),
         };
     }
 
     pub fn deinit(self: Self) void {
         self.code.deinit();
         self.data.deinit();
-        self.line_info.deinit();
+        self.instr_locs.deinit();
     }
 
-    /// Add an instruction or constant to the chunk. Expecting `item` to be a `Value`, `OpCode`, or `u8`.
+    /// Add an instruction or constant to the chunk. Expecting `item` to be a `Value`, `OpCode`,
+    /// `u16`, or `u8`.
     pub fn write(self: *Self, item: anytype, line: usize) !void {
         const T = @TypeOf(item);
         if (T == Value) {
-            try self.writeByte(@enumToInt(OpCode.constant), line);
-            try self.writeByte(try self.addConstant(item), line);
+            try self.writeVariableLenInstr(
+                .constant,
+                .constant_long,
+                try self.addConstant(item),
+                line,
+            );
         } else if (T == @Type(.EnumLiteral) or T == OpCode) {
             try self.writeByte(@enumToInt(@as(OpCode, item)), line);
+        } else if (T == u16) {
+            try self.writeByte(@truncate(u8, item), line);
+            if (item > std.math.maxInt(u8)) {
+                try self.writeByte(@truncate(u8, item >> 8), line);
+            }
         } else {
             // Expecting `T` to be u8.
             try self.writeByte(item, line);
         }
     }
 
-    fn writeByte(self: *Self, byte: u8, line: usize) !void {
-        try self.code.append(byte);
-        try self.line_info.update(line);
+    pub fn writeVariableLenInstr(
+        self: *Self,
+        u8_operand_op: OpCode,
+        u16_operand_op: OpCode,
+        operand: u16,
+        line: usize,
+    ) !void {
+        if (operand <= std.math.maxInt(u8)) {
+            try self.writeByte(@enumToInt(u8_operand_op), line);
+            try self.writeByte(@truncate(u8, operand), line);
+        } else {
+            try self.writeByte(@enumToInt(u16_operand_op), line);
+            try self.writeByte(@truncate(u8, operand), line);
+            try self.writeByte(@truncate(u8, operand >> 8), line);
+        }
     }
 
-    /// Add a constant to the data section of the chunk and return the index that it is stored at.
-    fn addConstant(self: *Self, val: Value) !u8 {
+    fn writeByte(self: *Self, byte: u8, line: usize) !void {
+        try self.code.append(byte);
+        try self.instr_locs.update(line);
+    }
+
+    /// Return the index of `self.data` that the constant is stored at.
+    pub fn addConstant(self: *Self, val: Value) !u16 {
         const index = self.data.elems.len;
-        if (index > 255) {
-            // TODO: Support a greater number of constants by adding new opcode with two byte
-            // indices.
+        if (index > std.math.maxInt(u16)) {
             std.debug.panic(
-                "Attempted to add a constant to a full chunk. Currently only 256 constants can " ++
-                    "fit in a chunk because `OpCode.constant` uses a single byte to store the " ++
-                    "index of a constant.\n ",
+                "internal compilation error: attempted to add a constant to a full bytecode chunk.\n",
                 .{},
             );
         }
         try self.data.append(val);
-        return @truncate(u8, index);
+        return @truncate(u16, index);
     }
 
     /// Display the contents of the chunk using the writer provided.
     pub fn disassemble(self: *Self, writer: anytype, chunk_name: []const u8) !void {
-        std.debug.assert(self.line_info.line_tbl.elems.len >= 2);
+        std.debug.assert(self.instr_locs.line_tbl.elems.len >= 2);
         try writer.print("== {s} ==\n", .{chunk_name});
-        var i: usize = 0;
-        while (i < self.code.elems.len) : (i = try self.disassembleInstr(writer, i)) {}
-        self.line_info.lower_bound = 0;
-        self.line_info.upper_bound = 0;
+        {
+            var i: usize = 0;
+            while (i < self.code.elems.len) : (i = try self.disassembleInstr(writer, i)) {}
+        }
+        self.instr_locs.lower_bound = 0;
+        self.instr_locs.upper_bound = 0;
     }
 
     pub fn disassembleInstr(self: *Self, writer: anytype, offset: usize) !usize {
         const op = @intToEnum(OpCode, self.code.elems[offset]);
         try writer.print("{:0>4} ", .{offset});
-        if (self.line_info.onSameLine(offset)) {
+        if (self.instr_locs.onSameLine(offset)) {
             try writer.print("   | ", .{});
         } else {
             try writer.print("{: >4} ", .{self.lineOfInstr(offset)});
         }
         try writer.print("{s}", .{@tagName(op)});
         return switch (op) {
-            .constant => blk: {
-                // Display a constant's index into `self.data` and its value.
-                const i: u8 = self.code.elems[offset + 1];
+            .constant,
+            .def_global,
+            .get_global,
+            .set_global,
+            => blk: {
+                // Display the index of `self.data` that a constant is stored at and its value.
+                const i = self.code.elems[offset + 1];
                 try writer.print(" {} '{}'\n", .{ i, self.data.elems[i] });
                 break :blk offset + 2;
+            },
+            .constant_long,
+            .def_global_long,
+            .get_global_long,
+            .set_global_long,
+            => blk: {
+                // Display the index of `self.data` that a constant is stored at and its value.
+                const i =
+                    (@as(u16, self.code.elems[offset + 2]) << 8) | self.code.elems[offset + 1];
+                try writer.print(" {} '{}'\n", .{ i, self.data.elems[i] });
+                break :blk offset + 3;
             },
             // Single byte instructions.
             else => blk: {
@@ -152,8 +213,8 @@ pub const Chunk = struct {
     pub fn lineOfInstr(self: *Self, ref: anytype) usize {
         const T = @TypeOf(ref);
         return switch (@typeInfo(T)) {
-            .Int => self.line_info.getLineFromOffset(ref),
-            .Pointer => self.line_info.getLineFromOffset(self.offsetOfAddr(ref)),
+            .Int => self.instr_locs.getLineFromOffset(ref),
+            .Pointer => self.instr_locs.getLineFromOffset(self.offsetOfAddr(ref)),
             else => @compileError("invalid type of `ref` parameter: " ++ @typeName(T)),
         };
     }
@@ -165,18 +226,19 @@ pub const Chunk = struct {
 
     /// Populate a test chunk with instructions and constants. Everything is written to the chunk at
     /// the same line number.
-    pub fn fill(self: *Self, comptime contents: anytype) !void {
-        inline for (contents) |item| {
+    pub fn fill(self: *Self, contents: anytype) !void {
+        inline for (std.meta.fields(@TypeOf(contents))) |field| {
+            // Expecting `item` to be a `Value`, `OpCode`, `u16`, or `u8`.
+            const item = @field(contents, field.name);
             try self.write(item, 1);
         }
     }
 
     /// Compare the instructions and constants of two chunks for equality.
     pub fn testingExpectEqual(expected: *Self, actual: *Self) !void {
-        try testing.expectEqualSlices(u8, expected.code.toSlice(), actual.code.toSlice());
-        // try testing.expectEqualSlices(Value, expected.data.toSlice(), actual.data.toSlice());
-        const expected_constants = expected.data.toSlice();
-        const actual_constants = actual.data.toSlice();
+        try testing.expectEqualSlices(u8, expected.code.elems, actual.code.elems);
+        const expected_constants = expected.data.elems;
+        const actual_constants = actual.data.elems;
         if (expected_constants.len != actual_constants.len) {
             std.debug.print("number of constants in chunk differ. expected {d}, found {d}\n", .{
                 expected_constants.len,
@@ -195,21 +257,21 @@ pub const Chunk = struct {
 
     test "disassemble" {
         var list = std.ArrayList(u8).init(testing.allocator);
-        var chunk = Chunk.init(testing.allocator);
+        var self = init(testing.allocator);
+        defer self.deinit();
         defer list.deinit();
-        defer chunk.deinit();
 
-        try chunk.write(Value.init(1.2), 1);
-        try chunk.write(Value.init(3.4), 1);
-        try chunk.write(.add, 1);
-        try chunk.write(Value.init(2), 1);
-        try chunk.write(.div, 1);
-        try chunk.write(.neg, 1);
-        try chunk.write(.ret, 2);
-        try chunk.write(.ret, 3);
-        try chunk.disassemble(list.writer(), "test chunk");
-        var expect =
-            \\== test chunk ==
+        try self.write(Value.init(1.2), 1);
+        try self.write(Value.init(3.4), 1);
+        try self.write(.add, 1);
+        try self.write(Value.init(2), 1);
+        try self.write(.div, 1);
+        try self.write(.neg, 1);
+        try self.write(.ret, 2);
+        try self.write(.ret, 3);
+        try self.disassemble(list.writer(), "test");
+        const expect =
+            \\== test ==
             \\0000    1 constant 0 '1.2'
             \\0002    | constant 1 '3.4'
             \\0004    | add
@@ -222,9 +284,25 @@ pub const Chunk = struct {
         ;
         try testing.expectEqualStrings(expect, list.items);
     }
+
+    test "chunk requiring u16 constant indices" {
+        var self = init(testing.allocator);
+        defer self.deinit();
+
+        var i: usize = 0;
+        while (i <= std.math.maxInt(u8)) : (i += 1) {
+            try self.write(Value.init(0), 1);
+        }
+        try self.write(Value.init(1), 1);
+        try testing.expectEqualSlices(
+            u8,
+            self.code.elems[self.code.elems.len - 3 ..],
+            &.{ @enumToInt(OpCode.constant_long), 0, 1 },
+        );
+    }
 };
 
-const LineInfo = struct {
+const LocationInfo = struct {
     const Self = @This();
     // A compressed list of (bytecode offset increment, line number increment) pairs. For each
     // instruction that begins a new line, the difference in offset and line number from the
@@ -250,7 +328,7 @@ const LineInfo = struct {
     fn update(self: *Self, cur_line: usize) !void {
         if (cur_line > self.line) {
             var cur_bytecode_offset: usize =
-                @fieldParentPtr(Chunk, "line_info", self).code.elems.len - 1;
+                @fieldParentPtr(Chunk, "instr_locs", self).code.elems.len - 1;
             var bytecode_incr: usize = cur_bytecode_offset - self.bytecode_offset;
             var line_incr: usize = cur_line - self.line;
             self.line = cur_line;

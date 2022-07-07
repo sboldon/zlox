@@ -3,12 +3,14 @@ const Allocator = std.mem.Allocator;
 
 const VirtMach = @import("virt_mach.zig").VirtMach;
 const Context = @import("Context.zig");
-const Module = @import("module.zig").Module;
+const Module = @import("Module.zig");
 const compile = @import("compile.zig");
 const ReplCompilation = @import("compile.zig").ReplCompilation;
 const bytecode = @import("bytecode.zig");
 const Chunk = bytecode.Chunk;
 const Value = @import("value.zig").Value;
+
+pub const log_level: std.log.Level = .debug;
 
 // Currently only supporting a source file name as the sole argument OR no arguments to invoke a
 // REPL.
@@ -37,6 +39,7 @@ pub fn main() anyerror!u8 {
     defer context.deinit();
 
     var vm = VirtMach.init(&context);
+    defer vm.deinit();
     vm.resetStack();
 
     if (context.main_module.is_toplevel) {
@@ -54,22 +57,23 @@ pub fn main() anyerror!u8 {
 fn repl(gpa: Allocator, context: *Context, vm: *VirtMach) !u8 {
     const stdin = std.io.getStdIn();
     const reader = std.io.bufferedReader(stdin.reader()).reader();
-    const stderr = std.io.getStdErr().writer();
+    const writer = std.io.getStdErr().writer();
     var state = try ReplCompilation.init(gpa, context);
     var line = std.mem.zeroes([1024:0]u8);
 
     while (true) {
-        try stderr.print("> ", .{});
+        try writer.print("> ", .{});
         if (reader.readUntilDelimiterOrEof(&line, '\n') catch |err| {
-            try stderr.print("\nunable to parse input: {s}\n", .{@errorName(err)});
+            try writer.print("\nunable to parse input: {s}\n", .{@errorName(err)});
             continue;
         }) |source_code| {
             // `source_code` slice does not include the delimiter so it is guaranteed that the
             // buffer has room for a sentinel.
             line[source_code.len] = 0;
-            if (state.compileSource(line[0..source_code.len :0])) {
-                try vm.interpret(state.parser.current_chunk);
-            } else |err| return err;
+            if (state.compileSource(line[0..source_code.len :0]) catch continue) {
+                vm.interpret(state.parser.current_chunk) catch continue;
+                // try state.parser.current_chunk.disassemble(writer, "disass post exec");
+            }
         }
     }
 }
@@ -94,8 +98,10 @@ pub fn writeAllColor(
 test "suite" {
     _ = @import("bytecode.zig");
     _ = @import("compile.zig");
+    _ = @import("Context.zig");
     _ = @import("dynamic_array.zig");
     _ = @import("interning.zig");
+    _ = @import("Module.zig");
     _ = @import("object.zig");
     _ = @import("scanner.zig");
     _ = @import("virt_mach.zig");

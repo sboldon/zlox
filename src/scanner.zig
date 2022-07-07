@@ -3,7 +3,7 @@ const testing = std.testing;
 
 const DynamicArray = @import("dynamic_array.zig").DynamicArray;
 const compile = @import("compile.zig");
-const Module = @import("module.zig").Module;
+const Module = @import("Module.zig");
 const Token = @import("Token.zig");
 
 pub const Scanner = struct {
@@ -235,8 +235,6 @@ pub const Scanner = struct {
                 // TODO: Should string literals be able to span multiple lines?
                 .string => switch (ch) {
                     0 => {
-                        // TODO: Error message "unterminated string literal"
-                        self.index += 1;
                         tok.type = .invalid;
                         break;
                     },
@@ -276,7 +274,7 @@ pub const Scanner = struct {
         try testCase("", &.{});
         try testCase("@", &.{.invalid});
 
-        // Individually test each token type with an invariable lexeme.
+        // Individually test each token type that has an invariable lexeme.
         inline for (std.meta.fields(Token.Type)) |field| {
             const tok_type = @intToEnum(Token.Type, field.value);
             if (tok_type.lexeme()) |lexeme| {
@@ -325,6 +323,7 @@ pub const Scanner = struct {
     test "strings" {
         try testCase("\"\"", &.{.string_literal});
         try testCase("\"a\"", &.{.string_literal});
+        try testCase("\"i am an unterminated string (oh no!)", &.{.invalid});
     }
 
     fn testCase(source: [:0]const u8, expected: []const Token.Type) !void {

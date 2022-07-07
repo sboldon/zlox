@@ -2,7 +2,9 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
-/// A custom implementation of the standard library's ArrayList type for the purpose of learning how
+const Value = @import("value.zig").Value;
+
+/// A custom implementation of the standard library's `ArrayList` type for the purpose of learning how
 /// allocators and generic types work in Zig.
 pub fn DynamicArray(comptime T: type) type {
     return struct {
@@ -21,11 +23,11 @@ pub fn DynamicArray(comptime T: type) type {
         }
 
         pub fn deinit(self: Self) void {
-            self.allocator.free(self.elems.ptr[0..self.capacity]);
+            self.allocator.free(self.allocatedSlice());
         }
 
         pub fn append(self: *Self, elem: T) !void {
-            const new_len: usize = self.elems.len + 1;
+            const new_len = self.elems.len + 1;
             try self.verifyCapacity(new_len);
             self.elems.ptr[self.elems.len] = elem;
             self.elems.len = new_len;
@@ -39,20 +41,15 @@ pub fn DynamicArray(comptime T: type) type {
             std.mem.copy(T, self.elems[len..], slice);
         }
 
-        // fn ToSliceRetType(self: anytype) type {
-
-        // }
-
-        /// The slice may be become invalid if it is used after additional elements have been
-        /// appended. `self` must be of type `*const Self` or `*Self`.
-        pub fn toSlice(self: *Self) []T {
-            return self.elems;
-        }
-
         /// The pointer may be bcome invalid if it is used after additional elements have been
         /// appended.
         pub fn end(self: Self) *T {
             return &self.elems[self.elems.len - 1];
+        }
+
+        /// Clear the array while maintaing its capacity.
+        pub fn clear(self: *Self) void {
+            self.elems.len = 0;
         }
 
         fn verifyCapacity(self: *Self, new_len: usize) !void {
@@ -65,44 +62,36 @@ pub fn DynamicArray(comptime T: type) type {
         }
 
         fn grow(self: *Self, capacity: usize) !void {
-            const resized_mem = try self.allocator.realloc(self.elems, capacity);
+            const resized_mem = try self.allocator.realloc(self.allocatedSlice(), capacity);
             self.elems.ptr = resized_mem.ptr;
             self.capacity = capacity;
         }
 
-        test "init" {
-            const arr = DynamicArray(u8).init(testing.allocator);
-            defer arr.deinit();
-            try testing.expect(arr.elems.len == 0);
-            try testing.expect(arr.capacity == 0);
-        }
-
-        test "append" {
-            var arr = DynamicArray(u8).init(testing.allocator);
-            defer arr.deinit();
-            try arr.append('c');
-            try testing.expectEqual(@as(usize, 1), arr.elems.len);
-            try testing.expectEqual(@as(u8, 'c'), arr.elems[0]);
-        }
-
-        test "appendSlice" {
-            var arr = DynamicArray(u8).init(testing.allocator);
-            defer arr.deinit();
-            const expect: []const u8 = "Hello World!";
-            try arr.appendSlice(expect);
-            try testing.expectEqualStrings(expect, arr.elems);
-        }
-
-        test "end" {
-            var arr = DynamicArray(u8).init(testing.allocator);
-            defer arr.deinit();
-            const str: []const u8 = "Hello World!";
-            try arr.appendSlice(str);
-            try testing.expectEqual(str[11], arr.end().*);
+        fn allocatedSlice(self: Self) []T {
+            return self.elems.ptr[0..self.capacity];
         }
     };
 }
 
-test {
-    testing.refAllDecls(@This());
+test "init" {
+    const arr = DynamicArray(u8).init(testing.allocator);
+    defer arr.deinit();
+    try testing.expect(arr.elems.len == 0);
+    try testing.expect(arr.capacity == 0);
+}
+
+test "append" {
+    var arr = DynamicArray(u8).init(testing.allocator);
+    defer arr.deinit();
+    try arr.append('c');
+    try testing.expectEqual(@as(usize, 1), arr.elems.len);
+    try testing.expectEqual(@as(u8, 'c'), arr.elems[0]);
+}
+
+test "appendSlice" {
+    var arr = DynamicArray(u8).init(testing.allocator);
+    defer arr.deinit();
+    const expect: []const u8 = "Hello World!";
+    try arr.appendSlice(expect);
+    try testing.expectEqualStrings(expect, arr.elems);
 }

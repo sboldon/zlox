@@ -46,7 +46,7 @@ pub const Value = union(ValueType) {
             .Void => .{ .nil = {} },
             .Bool => .{ .@"bool" = val },
             .Float, .Int, .ComptimeFloat, .ComptimeInt => .{ .number = val },
-            .Pointer => .{ .obj = val },
+            .Pointer => .{ .obj = if (T != *Obj) val.asObj() else val },
             else => @compileError("invalid type of `val` parameter: " ++ @typeName(T)),
         };
     }
@@ -57,7 +57,7 @@ pub const Value = union(ValueType) {
             .Void => self.nil = {},
             .Bool => self.@"bool" = val,
             .Float, .Int, .ComptimeFloat, .ComptimeInt => self.number = val,
-            .Pointer => self.obj = val,
+            .Pointer => self.obj = if (T != *Obj) val.asObj() else val,
             else => @compileError("invalid type of `val` parameter: " ++ @typeName(T)),
         }
     }
@@ -79,7 +79,7 @@ pub const Value = union(ValueType) {
     }
 
     pub fn isObjType(self: Self, obj_type: ObjType) bool {
-        return self.type() == .obj and self.asObj().@"type" == obj_type;
+        return self.type() == .obj and self.asObj().type == obj_type;
     }
 
     pub fn isEqual(self: Self, other: Self) bool {
@@ -89,11 +89,12 @@ pub const Value = union(ValueType) {
             .@"bool" => self.bool == other.bool,
             .number => self.number == other.number,
             // Strings can be compared via pointer equality because of interning. If two string
-            // objects have the same address, the have the same bytes.
+            // objects have the same address they also have the same bytes.
             .obj => self.obj == other.obj,
         };
     }
 
+    // TODO: Should empty string be falsey?
     /// All values, regardless of type, have a `true` boolean value except for `0`, `nil`, and `false`.
     pub fn isFalsey(self: Self) bool {
         return self.type() == ValueType.nil or
